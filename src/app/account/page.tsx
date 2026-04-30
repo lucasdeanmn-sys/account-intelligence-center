@@ -349,6 +349,7 @@ function AccountPageContent() {
             <PushToHubSpot
               dealId={briefing.dealName}
               dealName={briefing.dealName}
+              company={briefing.company}
               onClose={() => setShowPushModal(false)}
             />
           )}
