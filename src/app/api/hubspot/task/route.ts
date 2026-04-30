@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { runAgentLoop, hubspotServer, HUBSPOT_OWNER_ID } from "@/lib/anthropic";
 
-export const maxDuration = 30;
+export const maxDuration = 60;
 
-const HUBSPOT_OWNER_ID = "32225666";
+const SYSTEM = `You are a HubSpot CRM assistant. Your only job is to create a task on a specific deal using the HubSpot MCP tools available to you. Create the task exactly as instructed. Confirm success by returning the word DONE and the task/engagement ID if available.`;
 
 export async function POST(req: NextRequest) {
   try {
@@ -15,57 +16,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const token = process.env.HUBSPOT_ACCESS_TOKEN;
-    if (!token) {
-      return NextResponse.json(
-        { error: "HUBSPOT_ACCESS_TOKEN not configured" },
-        { status: 500 }
-      );
-    }
+    const result = await runAgentLoop(
+      SYSTEM,
+      `Create a task on HubSpot deal ID "${dealId}" with the following details. Associate it with owner ID ${HUBSPOT_OWNER_ID}.
 
-    const timestamp = Date.now();
-    const dueDateMs = dueDate ? new Date(dueDate).getTime() : undefined;
+Subject: ${subject}
+Priority: ${priority}${dueDate ? `\nDue date: ${dueDate}` : ""}${notes ? `\nNotes: ${notes}` : ""}`,
+      [hubspotServer()],
+      2048
+    );
 
-    const body = {
-      engagement: {
-        active: true,
-        ownerId: HUBSPOT_OWNER_ID,
-        type: "TASK",
-        timestamp,
-      },
-      associations: {
-        dealIds: [dealId],
-        contactIds: [],
-        companyIds: [],
-        ownerIds: [],
-        ticketIds: [],
-      },
-      metadata: {
-        body: notes || "",
-        subject,
-        status: "NOT_STARTED",
-        ...(dueDateMs && { taskType: "TODO", completionDate: dueDateMs }),
-        priority,
-        reminders: [],
-      },
-    };
-
-    const res = await fetch("https://api.hubapi.com/engagements/v1/engagements", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`HubSpot API error: ${err}`);
-    }
-
-    const data = await res.json();
-    return NextResponse.json({ success: true, engagementId: data.engagement?.id });
+    const success = /done|success|created|task/i.test(result);
+    return NextResponse.json({ success, result });
   } catch (error: any) {
     console.error("HubSpot task API error:", error);
     return NextResponse.json(
