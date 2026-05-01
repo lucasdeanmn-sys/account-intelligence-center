@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer } from "@/lib/anthropic";
+import { runAgentLoop, configured, hubspotServer } from "@/lib/anthropic";
 
 export const maxDuration = 60;
 
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
       `Add the following line items to HubSpot deal ID "${dealId}":
 
 ${itemList}`,
-      [hubspotServer()],
+      configured(hubspotServer()),
       2048
     );
 

@@ -17,48 +17,51 @@ export interface MCPServer {
   authorization_token?: string;
 }
 
-export function hubspotServer(): MCPServer {
+// Returns null when the required token isn't configured.
+// Routes filter these out before calling runAgentLoop.
+export function hubspotServer(): MCPServer | null {
+  if (!process.env.HUBSPOT_ACCESS_TOKEN) return null;
   return {
     type: "url",
     url: "https://mcp.hubspot.com/anthropic",
     name: "hubspot",
-    ...(process.env.HUBSPOT_ACCESS_TOKEN && {
-      authorization_token: process.env.HUBSPOT_ACCESS_TOKEN,
-    }),
+    authorization_token: process.env.HUBSPOT_ACCESS_TOKEN,
   };
 }
 
-export function gmailServer(): MCPServer {
+export function gmailServer(): MCPServer | null {
+  if (!process.env.GOOGLE_OAUTH_TOKEN) return null;
   return {
     type: "url",
     url: "https://gmailmcp.googleapis.com/mcp/v1",
     name: "gmail",
-    ...(process.env.GOOGLE_OAUTH_TOKEN && {
-      authorization_token: `Bearer ${process.env.GOOGLE_OAUTH_TOKEN}`,
-    }),
+    authorization_token: `Bearer ${process.env.GOOGLE_OAUTH_TOKEN}`,
   };
 }
 
-export function calendarServer(): MCPServer {
+export function calendarServer(): MCPServer | null {
+  if (!process.env.GOOGLE_OAUTH_TOKEN) return null;
   return {
     type: "url",
     url: "https://calendarmcp.googleapis.com/mcp/v1",
     name: "calendar",
-    ...(process.env.GOOGLE_OAUTH_TOKEN && {
-      authorization_token: `Bearer ${process.env.GOOGLE_OAUTH_TOKEN}`,
-    }),
+    authorization_token: `Bearer ${process.env.GOOGLE_OAUTH_TOKEN}`,
   };
 }
 
-export function cssaServer(): MCPServer {
+export function cssaServer(): MCPServer | null {
+  if (!process.env.CSSA_API_KEY) return null;
   return {
     type: "url",
     url: "https://computed-success-analysis-mcp-production.up.railway.app/sse",
     name: "cssa",
-    ...(process.env.CSSA_API_KEY && {
-      authorization_token: process.env.CSSA_API_KEY,
-    }),
+    authorization_token: process.env.CSSA_API_KEY,
   };
+}
+
+// Helper — drops unconfigured (null) servers from a list
+export function configured(...servers: (MCPServer | null)[]): MCPServer[] {
+  return servers.filter((s): s is MCPServer => s !== null);
 }
 
 export async function runAgentLoop(

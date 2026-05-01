@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer, HUBSPOT_OWNER_ID } from "@/lib/anthropic";
+import { runAgentLoop, configured, hubspotServer, HUBSPOT_OWNER_ID } from "@/lib/anthropic";
 
 export const maxDuration = 60;
 
@@ -24,7 +24,7 @@ First name: ${firstName}
 Last name: ${lastName}
 Email: ${email}${phone ? `\nPhone: ${phone}` : ""}${title ? `\nJob title: ${title}` : ""}
 Owner ID: ${HUBSPOT_OWNER_ID}`,
-      [hubspotServer()],
+      configured(hubspotServer()),
       2048
     );
 

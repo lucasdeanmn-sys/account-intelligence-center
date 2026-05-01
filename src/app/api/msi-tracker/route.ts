@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer, cssaServer, extractJSON } from "@/lib/anthropic";
+import { runAgentLoop, hubspotServer, cssaServer, configured, extractJSON } from "@/lib/anthropic";
 import type { MSIDeal } from "@/lib/types";
 
 export const maxDuration = 180;
@@ -65,8 +65,15 @@ Return ONLY valid JSON:
 \`\`\``;
 
 export async function GET() {
+  if (!process.env.HUBSPOT_ACCESS_TOKEN) {
+    return NextResponse.json(
+      { error: "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables." },
+      { status: 503 }
+    );
+  }
+
   try {
-    const servers = [hubspotServer(), cssaServer()];
+    const servers = configured(hubspotServer(), cssaServer());
     const today = new Date().toISOString().split("T")[0];
 
     const result = await runAgentLoop(

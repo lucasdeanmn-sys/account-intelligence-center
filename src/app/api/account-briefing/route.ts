@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer, gmailServer, calendarServer, extractJSON } from "@/lib/anthropic";
+import { runAgentLoop, hubspotServer, gmailServer, calendarServer, configured, extractJSON } from "@/lib/anthropic";
 import type { AccountBriefing } from "@/lib/types";
 
 export const maxDuration = 120;
@@ -41,13 +41,20 @@ Return ONLY valid JSON in this format:
 \`\`\``;
 
 export async function POST(req: NextRequest) {
+  if (!process.env.HUBSPOT_ACCESS_TOKEN) {
+    return NextResponse.json(
+      { error: "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables." },
+      { status: 503 }
+    );
+  }
+
   try {
     const { company } = await req.json();
     if (!company) {
       return NextResponse.json({ error: "company is required" }, { status: 400 });
     }
 
-    const servers = [hubspotServer(), gmailServer(), calendarServer()];
+    const servers = configured(hubspotServer(), gmailServer(), calendarServer());
     const today = new Date().toISOString().split("T")[0];
 
     const result = await runAgentLoop(

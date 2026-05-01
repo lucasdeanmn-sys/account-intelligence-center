@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer, HUBSPOT_OWNER_ID } from "@/lib/anthropic";
+import { runAgentLoop, configured, hubspotServer, HUBSPOT_OWNER_ID } from "@/lib/anthropic";
 
 export const maxDuration = 60;
 
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
 
 Subject: ${subject}
 Priority: ${priority}${dueDate ? `\nDue date: ${dueDate}` : ""}${notes ? `\nNotes: ${notes}` : ""}`,
-      [hubspotServer()],
+      configured(hubspotServer()),
       2048
     );
 
