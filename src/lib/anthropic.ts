@@ -1,8 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-export const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+// Do NOT initialize at module level — Next.js serverless bundling can
+// evaluate module-level code before env vars are injected at runtime.
+function getClient() {
+  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+}
 
 export const MODEL = "claude-sonnet-4-20250514";
 export const MCP_BETA = "mcp-client-2025-04-04";
@@ -73,7 +75,7 @@ export async function runAgentLoop(
   const MAX_ITERATIONS = 30;
 
   while (iterations < MAX_ITERATIONS) {
-    const response = await (anthropic.beta.messages as any).create({
+    const response = await (getClient().beta.messages as any).create({
       model: MODEL,
       max_tokens: maxTokens,
       system,
