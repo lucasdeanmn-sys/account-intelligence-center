@@ -1,17 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer, gmailServer, calendarServer, configured, extractJSON } from "@/lib/anthropic";
+import { callClaude, extractJSON } from "@/lib/anthropic";
+import {
+  searchDeals,
+  getDealContacts,
+  getDealNotes,
+  getDealTasks,
+} from "@/lib/hubspot";
 import type { AccountBriefing } from "@/lib/types";
 
 export const maxDuration = 120;
 
 const SYSTEM = `You are an AI sales intelligence assistant for a B2B SaaS account executive.
-You have access to HubSpot CRM, Gmail, and Google Calendar via MCP tools.
+HubSpot CRM data (deals, contacts, notes, tasks) has already been fetched and is provided in the user message.
+You may have access to Gmail and Google Calendar via MCP tools — use them to enrich the briefing with recent email and meeting context.
 
-Generate a comprehensive account briefing by pulling data from all available sources.
+For MSI deals (deal name contains "(MSI"), note that outreach should go through the Adtran territory manager.
 
-For MSI deals (deal name contains "(MSI"), include a note that outreach should go through the Adtran territory manager.
-
-Return ONLY valid JSON in this format:
+Return ONLY valid JSON:
 \`\`\`json
 {
   "dealName": "Full deal name from HubSpot",
@@ -43,7 +48,10 @@ Return ONLY valid JSON in this format:
 export async function POST(req: NextRequest) {
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
     return NextResponse.json(
-      { error: "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables." },
+      {
+        error:
+          "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables.",
+      },
       { status: 503 }
     );
   }
@@ -51,38 +59,85 @@ export async function POST(req: NextRequest) {
   try {
     const { company } = await req.json();
     if (!company) {
-      return NextResponse.json({ error: "company is required" }, { status: 400 });
+      return NextResponse.json(
+        { error: "company is required" },
+        { status: 400 }
+      );
     }
 
-    const servers = configured(hubspotServer(), gmailServer(), calendarServer());
+    // Fetch deals matching the company name
+    const rawDeals = await searchDeals(
+      [{ propertyName: "dealname", operator: "CONTAINS_TOKEN", value: company }],
+      [
+        "dealname",
+        "dealstage",
+        "amount",
+        "closedate",
+        "notes_last_activity_date",
+        "notes_last_contacted",
+        "hs_lastmodifieddate",
+      ],
+      10
+    );
+
+    // Enrich the top matching deal(s) with contacts, notes, tasks in parallel
+    const enriched = await Promise.all(
+      rawDeals.slice(0, 3).map(async (deal: any) => {
+        const [contacts, notes, tasks] = await Promise.all([
+          getDealContacts(deal.id).catch(() => []),
+          getDealNotes(deal.id).catch(() => []),
+          getDealTasks(deal.id).catch(() => []),
+        ]);
+        return {
+          id: deal.id,
+          ...deal.properties,
+          contacts: contacts.map((c: any) => c.properties),
+          notes: notes
+            .sort(
+              (a: any, b: any) =>
+                new Date(b.properties?.hs_timestamp ?? 0).getTime() -
+                new Date(a.properties?.hs_timestamp ?? 0).getTime()
+            )
+            .slice(0, 10)
+            .map((n: any) => ({
+              body: n.properties?.hs_note_body,
+              timestamp: n.properties?.hs_timestamp,
+            })),
+          tasks: tasks.map((t: any) => ({
+            subject: t.properties?.hs_task_subject,
+            status: t.properties?.hs_task_status,
+            priority: t.properties?.hs_task_priority,
+            dueDate: t.properties?.hs_timestamp,
+            body: t.properties?.hs_task_body,
+          })),
+        };
+      })
+    );
+
     const today = new Date().toISOString().split("T")[0];
 
-    const result = await runAgentLoop(
+    const result = await callClaude(
       SYSTEM,
       `Today is ${today}. Generate a full account briefing for: "${company}"
 
-Steps:
-1. Search HubSpot for deals and companies matching "${company}". Get the deal details, associated contacts, recent notes, and open tasks.
-2. Search Gmail for recent email threads with contacts at this company (search by company domain or contact email addresses). Look back 90 days.
-3. Check Google Calendar for recent and upcoming meetings with this account.
-4. Note any overdue tasks or unanswered emails.
+## HubSpot Data (pre-fetched)
+${JSON.stringify(enriched, null, 2)}
 
-Synthesize everything into the JSON briefing format. Be specific and actionable.`,
-      servers,
+Use the deal, contact, notes, and task data above to generate the JSON briefing. Note any overdue tasks. Return the JSON.`,
       8096
     );
 
     let briefing: AccountBriefing;
     try {
       briefing = extractJSON<AccountBriefing>(result);
-      // Enforce MSI logic
-      if (briefing.isMSI) {
-        briefing.recommendedNextStep = briefing.recommendedNextStep.includes("Adtran")
-          ? briefing.recommendedNextStep
-          : `Contact Adtran territory manager first. Then: ${briefing.recommendedNextStep}`;
+      if (briefing.isMSI && !briefing.recommendedNextStep.includes("Adtran")) {
+        briefing.recommendedNextStep = `Contact Adtran territory manager first. Then: ${briefing.recommendedNextStep}`;
       }
     } catch {
-      return NextResponse.json({ briefing: null, rawResponse: result }, { status: 200 });
+      return NextResponse.json(
+        { briefing: null, rawResponse: result },
+        { status: 200 }
+      );
     }
 
     return NextResponse.json({ briefing });

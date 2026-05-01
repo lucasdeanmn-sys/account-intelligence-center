@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer, cssaServer, configured, extractJSON } from "@/lib/anthropic";
+import { callClaude, extractJSON } from "@/lib/anthropic";
+import { searchDeals, getDealNotes } from "@/lib/hubspot";
 import type { MSIDeal } from "@/lib/types";
 
 export const maxDuration = 180;
@@ -25,7 +26,7 @@ Example M1 note:
 Means: 50 contracted circuits, Year 3 renews Jan 2026, contract value $14,520
 
 ## Circuit Discrepancy Logic
-- Pull actual circuit count from CSSA for each company
+- If CSSA tools are available, query CSSA for actual circuit count for each company
 - If actual ≠ contracted: flag as "circuit_discrepancy"
 - Recommended invoice circuits = actual circuits rounded UP to next multiple of 50
   (e.g., actual=73 → recommend 100; actual=50 → no discrepancy if matches contract)
@@ -67,31 +68,63 @@ Return ONLY valid JSON:
 export async function GET() {
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
     return NextResponse.json(
-      { error: "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables." },
+      {
+        error:
+          "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables.",
+      },
       { status: 503 }
     );
   }
 
   try {
-    const servers = configured(hubspotServer(), cssaServer());
+    // Fetch all deals with "(MSI" in the name directly from HubSpot
+    const rawDeals = await searchDeals(
+      [{ propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" }],
+      ["dealname", "dealstage", "amount", "closedate", "hs_is_closed"],
+      100
+    );
+
+    // Filter to only deals that literally contain "(MSI"
+    const msiDeals = rawDeals.filter((d: any) =>
+      d.properties?.dealname?.includes("(MSI")
+    );
+
+    // Fetch notes for all MSI deals in parallel
+    const notesPerDeal = await Promise.all(
+      msiDeals.map((d: any) => getDealNotes(d.id).catch(() => [] as any[]))
+    );
+
+    // Build enriched deal context for Claude
+    const enriched = msiDeals.map((deal: any, i: number) => {
+      const notes: any[] = notesPerDeal[i] ?? [];
+      return {
+        id: deal.id,
+        name: deal.properties?.dealname,
+        stage: deal.properties?.dealstage,
+        closeDate: deal.properties?.closedate,
+        isClosed: deal.properties?.hs_is_closed === "true",
+        notes: notes.map((n: any) => ({
+          body: n.properties?.hs_note_body,
+          timestamp: n.properties?.hs_timestamp,
+        })),
+      };
+    });
+
     const today = new Date().toISOString().split("T")[0];
 
-    const result = await runAgentLoop(
+    const result = await callClaude(
       SYSTEM,
       `Today is ${today}.
 
-Steps:
-1. Search HubSpot for ALL deals with "(MSI" in the deal name. Get all of them, not just open ones.
-2. For each MSI deal:
-   a. Get the full deal record including all notes
-   b. Find the note with subject/title "M1" or body starting with circuit counts — this is the M1 renewal note
-   c. Parse the M1 note to extract contracted circuits, contract value, and next renewal date
-   d. Query CSSA for the actual current circuit count for this company
-   e. Apply all relevant flags
-3. Return the complete JSON array for all MSI deals found.
+## HubSpot MSI Deals (pre-fetched — ${enriched.length} deals)
+${JSON.stringify(enriched, null, 2)}
 
-Be thorough — find all MSI deals in the CRM.`,
-      servers,
+Instructions:
+1. For each deal above, find the M1 note in the notes array.
+2. Parse the M1 note to extract contracted circuits, contract value, and next renewal date.
+3. Apply all relevant flags based on the parsed data and today's date (${today}).
+4. For circuit discrepancy checks, set actualCircuits to null and flag as "cssa_unavailable" since CSSA is not connected.
+5. Return the complete JSON array for all ${enriched.length} MSI deals.`,
       16000
     );
 
@@ -99,7 +132,10 @@ Be thorough — find all MSI deals in the CRM.`,
     try {
       deals = extractJSON<MSIDeal[]>(result);
     } catch {
-      return NextResponse.json({ deals: [], rawResponse: result }, { status: 200 });
+      return NextResponse.json(
+        { deals: [], rawResponse: result },
+        { status: 200 }
+      );
     }
 
     // Sort: flagged first, then by renewal date
@@ -108,7 +144,10 @@ Be thorough — find all MSI deals in the CRM.`,
       const bFlagged = b.flags.length > 0 ? -1 : 1;
       if (aFlagged !== bFlagged) return aFlagged - bFlagged;
       if (a.nextRenewalDate && b.nextRenewalDate) {
-        return new Date(a.nextRenewalDate).getTime() - new Date(b.nextRenewalDate).getTime();
+        return (
+          new Date(a.nextRenewalDate).getTime() -
+          new Date(b.nextRenewalDate).getTime()
+        );
       }
       return 0;
     });

@@ -1,33 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, configured, hubspotServer, HUBSPOT_OWNER_ID } from "@/lib/anthropic";
+import { createNote } from "@/lib/hubspot";
+import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
 
-export const maxDuration = 60;
-
-const SYSTEM = `You are a HubSpot CRM assistant. Your only job is to create a note on a specific deal using the HubSpot MCP tools available to you. Create the note exactly as instructed — do not modify the content. Confirm success by returning the word DONE and the engagement/note ID if available.`;
+export const maxDuration = 30;
 
 export async function POST(req: NextRequest) {
   try {
     const { dealId, htmlContent } = await req.json();
-
     if (!dealId || !htmlContent) {
       return NextResponse.json(
         { error: "dealId and htmlContent are required" },
         { status: 400 }
       );
     }
-
-    const result = await runAgentLoop(
-      SYSTEM,
-      `Create a note on HubSpot deal ID "${dealId}" with the following HTML body content. Associate it with owner ID ${HUBSPOT_OWNER_ID}.
-
-Note body (HTML):
-${htmlContent}`,
-      configured(hubspotServer()),
-      2048
-    );
-
-    const success = /done|success|created|note/i.test(result);
-    return NextResponse.json({ success, result });
+    const note = await createNote(dealId, htmlContent, HUBSPOT_OWNER_ID);
+    return NextResponse.json({ success: true, id: note.id });
   } catch (error: any) {
     console.error("HubSpot note API error:", error);
     return NextResponse.json(

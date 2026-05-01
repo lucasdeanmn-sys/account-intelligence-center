@@ -1,26 +1,25 @@
 import { NextResponse } from "next/server";
-import { runAgentLoop, hubspotServer, gmailServer, calendarServer, configured, extractJSON } from "@/lib/anthropic";
+import { callClaude, extractJSON } from "@/lib/anthropic";
+import { searchDeals, getDealTasks } from "@/lib/hubspot";
 import type { PriorityDeal } from "@/lib/types";
 
 export const maxDuration = 120;
 export const dynamic = "force-dynamic";
 
 const SYSTEM = `You are an AI sales assistant for a B2B SaaS account executive.
-You have access to HubSpot CRM, Gmail, and Google Calendar via MCP tools.
-
-Your job is to pull recently active deals and rank them by priority for today.
+HubSpot CRM deal data has already been fetched and is provided in the user message as JSON.
+You may have access to Gmail and Google Calendar via MCP tools — use them to cross-reference last contact dates and upcoming meetings.
 
 Priority factors (weighted):
 1. Renewal urgency / close date proximity (highest weight)
-2. Overdue tasks
+2. Overdue tasks (tasks with status NOT_STARTED and past due date)
 3. Days since last activity (longer = higher priority)
-4. Stage stagnation (deal stuck in same stage for 30+ days)
-5. Recent email/calendar activity cross-reference (use Gmail and Calendar to find true last contact date)
+4. Stage stagnation (deal stuck in same stage for 30+ days based on hs_createdate vs closedate)
+5. Recent email/calendar activity (use Gmail and Calendar tools if available)
 
-MSI deals (name contains "(MSI"): These are Adtran channel deals.
-For MSI deals, the suggested action should ALWAYS be "Follow up with Adtran territory manager" rather than direct prospect outreach.
+MSI deals (name contains "(MSI"): suggested action should ALWAYS be "Follow up with Adtran territory manager".
 
-Return ONLY valid JSON in this format:
+Return ONLY valid JSON:
 \`\`\`json
 [
   {
@@ -42,40 +41,94 @@ Return ONLY valid JSON in this format:
 ]
 \`\`\`
 
-Pull at least 10-15 of the most recently active or close-date-relevant deals. Rank by priority score (10 = highest priority, 1 = lowest).`;
+Return 10-15 deals ranked by priority score (10 = highest, 1 = lowest).`;
+
+const DEAL_PROPS = [
+  "dealname",
+  "dealstage",
+  "amount",
+  "closedate",
+  "hubspot_owner_id",
+  "notes_last_activity_date",
+  "notes_last_contacted",
+  "hs_lastmodifieddate",
+  "hs_createdate",
+];
 
 export async function GET() {
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
     return NextResponse.json(
-      { error: "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables." },
+      {
+        error:
+          "HubSpot is not configured. Add HUBSPOT_ACCESS_TOKEN to your environment variables.",
+      },
       { status: 503 }
     );
   }
 
   try {
-    const servers = configured(hubspotServer(), gmailServer(), calendarServer());
+    // Fetch open deals owned by this AE directly from HubSpot REST API
+    const rawDeals = await searchDeals(
+      [
+        {
+          propertyName: "hubspot_owner_id",
+          operator: "EQ",
+          value: "32225666",
+        },
+        { propertyName: "hs_is_closed", operator: "EQ", value: "false" },
+      ],
+      DEAL_PROPS,
+      50,
+      [{ propertyName: "notes_last_activity_date", direction: "DESCENDING" }]
+    );
+
+    // For the top 20 deals, fetch associated tasks in parallel
+    const top20 = rawDeals.slice(0, 20);
+    const tasksPerDeal = await Promise.all(
+      top20.map((d: any) =>
+        getDealTasks(d.id).catch(() => [] as any[])
+      )
+    );
+
+    const now = Date.now();
+    const dealsWithTasks = top20.map((deal: any, i: number) => {
+      const tasks: any[] = tasksPerDeal[i] ?? [];
+      const overdueTasks = tasks.filter((t: any) => {
+        const status = t.properties?.hs_task_status;
+        const due = t.properties?.hs_timestamp;
+        return (
+          status === "NOT_STARTED" && due && new Date(due).getTime() < now
+        );
+      });
+      return {
+        id: deal.id,
+        ...deal.properties,
+        overdueTaskCount: overdueTasks.length,
+        tasks: tasks.map((t: any) => ({
+          subject: t.properties?.hs_task_subject,
+          status: t.properties?.hs_task_status,
+          priority: t.properties?.hs_task_priority,
+          dueDate: t.properties?.hs_timestamp,
+        })),
+      };
+    });
 
     const today = new Date().toISOString().split("T")[0];
 
-    const result = await runAgentLoop(
+    const result = await callClaude(
       SYSTEM,
       `Today is ${today}.
 
-Please:
-1. Search HubSpot for open deals owned by owner 32225666, focusing on those with recent activity, upcoming close dates, or overdue tasks.
-2. For each deal, check Gmail for recent email threads with the deal's company domain to get the true last contact date.
-3. Check Google Calendar for any upcoming or recent meetings with these accounts.
-4. Rank all deals by priority and return the JSON array.
+## HubSpot Open Deals (pre-fetched)
+${JSON.stringify(dealsWithTasks, null, 2)}
 
-Focus on deals in active stages (not closed won/lost). Look back 90 days for activity.`,
-      servers,
+Analyze the deal data above and return the JSON priority array for the top 10-15 deals.`,
       8096
     );
 
     let deals: PriorityDeal[] = [];
     try {
       deals = extractJSON<PriorityDeal[]>(result);
-      // Ensure MSI flag is set correctly
       deals = deals.map((d) => ({
         ...d,
         isMSI: d.name?.includes("(MSI") || false,
@@ -84,8 +137,10 @@ Focus on deals in active stages (not closed won/lost). Look back 90 days for act
           : d.suggestedAction,
       }));
     } catch {
-      // If JSON extraction fails, return empty with the raw text as error
-      return NextResponse.json({ deals: [], rawResponse: result }, { status: 200 });
+      return NextResponse.json(
+        { deals: [], rawResponse: result },
+        { status: 200 }
+      );
     }
 
     return NextResponse.json({ deals });

@@ -64,6 +64,24 @@ export function configured(...servers: (MCPServer | null)[]): MCPServer[] {
   return servers.filter((s): s is MCPServer => s !== null);
 }
 
+// Plain Claude call — no MCP, no beta header. Use this when data is pre-loaded.
+export async function callClaude(
+  system: string,
+  userMessage: string,
+  maxTokens = 8096
+): Promise<string> {
+  const response = await getClient().messages.create({
+    model: MODEL,
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: "user", content: userMessage }],
+  });
+  return response.content
+    .filter((b) => b.type === "text")
+    .map((b) => (b as any).text)
+    .join("\n");
+}
+
 export async function runAgentLoop(
   system: string,
   userMessage: string,

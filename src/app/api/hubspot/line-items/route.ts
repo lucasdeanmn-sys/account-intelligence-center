@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, configured, hubspotServer } from "@/lib/anthropic";
+import { searchProducts, createLineItem } from "@/lib/hubspot";
 
 export const maxDuration = 60;
-
-const SYSTEM = `You are a HubSpot CRM assistant. Add line items to a deal. For each line item, search the HubSpot product library first — if a matching product exists, use it. If not, create a custom line item. Associate all line items with the specified deal. Confirm success with the word DONE and the line item IDs.`;
 
 export async function POST(req: NextRequest) {
   try {
     const { dealId, lineItems } = await req.json();
-
     if (!dealId || !lineItems?.length) {
       return NextResponse.json(
         { error: "dealId and at least one line item are required" },
@@ -16,23 +13,37 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const itemList = lineItems
-      .map(
-        (item: { name: string; quantity: string; unitPrice: string; description: string }, i: number) =>
-          `${i + 1}. Name: ${item.name} | Quantity: ${item.quantity || 1}${item.unitPrice ? ` | Unit price: $${item.unitPrice}` : ""}${item.description ? ` | Description: ${item.description}` : ""}`
-      )
-      .join("\n");
+    const created: Array<{ id: string; name: string }> = [];
 
-    const result = await runAgentLoop(
-      SYSTEM,
-      `Add the following line items to HubSpot deal ID "${dealId}":
+    for (const item of lineItems as Array<{
+      name: string;
+      quantity?: string | number;
+      unitPrice?: string;
+      description?: string;
+    }>) {
+      const quantity = Number(item.quantity ?? 1);
 
-${itemList}`,
-      configured(hubspotServer()),
-      2048
-    );
+      // Search product catalog first; use product ID if found
+      let productId: string | null = null;
+      if (item.name) {
+        const products = await searchProducts(item.name);
+        if (products.length > 0) {
+          productId = products[0].id;
+        }
+      }
 
-    return NextResponse.json({ success: true, result });
+      const lineItem = await createLineItem(
+        dealId,
+        item.name,
+        quantity,
+        item.unitPrice ?? null,
+        item.description ?? null,
+        productId
+      );
+      created.push({ id: lineItem.id, name: item.name });
+    }
+
+    return NextResponse.json({ success: true, lineItems: created });
   } catch (error: any) {
     console.error("HubSpot line-items API error:", error);
     return NextResponse.json(
