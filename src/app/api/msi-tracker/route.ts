@@ -26,7 +26,7 @@ Example M1 note:
 Means: 50 contracted circuits, Year 3 renews Jan 2026, contract value $14,520
 
 ## Circuit Discrepancy Logic
-- If CSSA tools are available, query CSSA for actual circuit count for each company
+- If CSA tools are available, query CSA for actual circuit count for each company
 - If actual ≠ contracted: flag as "circuit_discrepancy"
 - Recommended invoice circuits = actual circuits rounded UP to next multiple of 50
   (e.g., actual=73 → recommend 100; actual=50 → no discrepancy if matches contract)
@@ -35,10 +35,10 @@ Means: 50 contracted circuits, Year 3 renews Jan 2026, contract value $14,520
 ## Flags to Apply
 - "missing_m1_note": No M1 note found on deal
 - "malformed_m1_note": M1 note exists but can't be parsed
-- "circuit_discrepancy": CSSA actual ≠ contracted circuits
+- "circuit_discrepancy": CSA actual ≠ contracted circuits
 - "renewal_imminent": Next renewal within 30 days
 - "renewal_overdue": Next renewal date is in the past
-- "cssa_unavailable": CSSA returned no data for this company
+- "csa_unavailable": CSA returned no data for this company
 
 Today's date will be provided. Use it to calculate renewal timing.
 
@@ -123,7 +123,7 @@ Instructions:
 1. For each deal above, find the M1 note in the notes array.
 2. Parse the M1 note to extract contracted circuits, contract value, and next renewal date.
 3. Apply all relevant flags based on the parsed data and today's date (${today}).
-4. For circuit discrepancy checks, set actualCircuits to null and flag as "cssa_unavailable" since CSSA is not connected.
+4. For circuit discrepancy checks, set actualCircuits to null and flag as "csa_unavailable" since CSA is not connected.
 5. Return the complete JSON array for all ${enriched.length} MSI deals.`,
       16000
     );

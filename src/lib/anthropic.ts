@@ -49,13 +49,13 @@ export function calendarServer(): MCPServer | null {
   };
 }
 
-export function cssaServer(): MCPServer | null {
-  if (!process.env.CSSA_API_KEY) return null;
+export function csaServer(): MCPServer | null {
+  if (!process.env.CSA_API_KEY) return null;
   return {
     type: "url",
     url: "https://computed-success-analysis-mcp-production.up.railway.app/sse",
-    name: "cssa",
-    authorization_token: process.env.CSSA_API_KEY,
+    name: "csa",
+    authorization_token: process.env.CSA_API_KEY,
   };
 }
 

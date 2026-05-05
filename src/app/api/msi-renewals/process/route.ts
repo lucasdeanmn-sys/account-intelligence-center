@@ -22,8 +22,8 @@ export async function POST(req: NextRequest) {
       expirationDate,
       company,
       orderFormLicense,
-      cssaCount,
-      cssaRounded,
+      csaCount,
+      csaRounded,
     } = await req.json();
 
     if (!currentDealId || !renewalDealName || !renewalCount || !expirationDate) {
@@ -86,8 +86,8 @@ export async function POST(req: NextRequest) {
       await appendRenewalRow(monthLabel, {
         company,
         currentLicense: orderFormLicense ?? null,
-        cssaCount: cssaCount ?? null,
-        cssaRounded: cssaRounded ?? null,
+        csaCount: csaCount ?? null,
+        csaRounded: csaRounded ?? null,
         renewalCount,
       }).catch((e) => console.warn("Sheet write failed (non-fatal):", e.message));
     }

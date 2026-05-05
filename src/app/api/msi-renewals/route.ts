@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callClaude, runAgentLoop, cssaServer, configured, extractJSON } from "@/lib/anthropic";
+import { callClaude, runAgentLoop, csaServer, configured, extractJSON } from "@/lib/anthropic";
 import { getMsiDealsByStartDate, getDealNotes, getDealLineItems } from "@/lib/hubspot";
 import type { RenewalEntry } from "@/lib/types";
 
@@ -50,7 +50,7 @@ For each deal, extract:
 Return ONLY valid JSON array:
 [{"dealId":"...","msiYear":4,"nextMsiYear":5,"orderFormLicense":2000,"m1NoteHtml":"..."}]`;
 
-const CSSA_SYSTEM = `You have access to CSSA tools. For each company name provided, query CSSA to get the current circuit/subscriber count.
+const CSA_SYSTEM = `You have access to CSA tools. For each company name provided, query CSA to get the current circuit/subscriber count.
 Return ONLY valid JSON mapping company names to counts (use null if not found):
 {"Company Name": 12345, "Another Co": null}`;
 
@@ -137,21 +137,21 @@ export async function GET(req: NextRequest) {
 
     const parsedMap = new Map(parsedNotes.map((p: any) => [p.dealId, p]));
 
-    // 4. Query CSSA for circuit counts (optional — graceful fallback)
+    // 4. Query CSA for circuit counts (optional — graceful fallback)
     const companies = filtered.map((d: any) => extractCompany(d.properties?.dealname ?? ""));
-    let cssaMap: Record<string, number | null> = {};
-    const cssaServers = configured(cssaServer());
-    if (cssaServers.length > 0) {
+    let csaMap: Record<string, number | null> = {};
+    const csaServers = configured(csaServer());
+    if (csaServers.length > 0) {
       try {
-        const cssaResult = await runAgentLoop(
-          CSSA_SYSTEM,
+        const csaResult = await runAgentLoop(
+          CSA_SYSTEM,
           `Get current circuit counts for these companies:\n${JSON.stringify(companies)}`,
-          cssaServers,
+          csaServers,
           4096
         );
-        cssaMap = extractJSON<Record<string, number | null>>(cssaResult);
+        csaMap = extractJSON<Record<string, number | null>>(csaResult);
       } catch {
-        // CSSA unavailable — proceed with nulls
+        // CSA unavailable — proceed with nulls
       }
     }
 
@@ -163,21 +163,21 @@ export async function GET(req: NextRequest) {
       const nextMsiYear = msiYear ? msiYear + 1 : null;
       const orderFormLicense: number | null = parsed.orderFormLicense ?? null;
 
-      // CSSA: fuzzy match by company name
-      const cssaCount: number | null =
-        cssaMap[company] ??
-        Object.entries(cssaMap).find(([k]) =>
+      // CSA: fuzzy match by company name
+      const csaCount: number | null =
+        csaMap[company] ??
+        Object.entries(csaMap).find(([k]) =>
           k.toLowerCase().includes(company.toLowerCase().slice(0, 6))
         )?.[1] ?? null;
 
-      const cssaRounded =
-        cssaCount !== null
-          ? Math.max(1000, Math.ceil(cssaCount / 50) * 50)
+      const csaRounded =
+        csaCount !== null
+          ? Math.max(1000, Math.ceil(csaCount / 50) * 50)
           : null;
 
       const renewalCount =
-        cssaRounded !== null || orderFormLicense !== null
-          ? Math.max(cssaRounded ?? 0, orderFormLicense ?? 0)
+        csaRounded !== null || orderFormLicense !== null
+          ? Math.max(csaRounded ?? 0, orderFormLicense ?? 0)
           : null;
 
       const renewalDeal = renewalDealMap.get(company.toLowerCase()) ?? null;
@@ -190,8 +190,8 @@ export async function GET(req: NextRequest) {
         msiYear,
         nextMsiYear,
         orderFormLicense,
-        cssaCount,
-        cssaRounded,
+        csaCount,
+        csaRounded,
         renewalCount,
         renewalDealId: renewalDeal?.id ?? null,
         renewalDealName,

@@ -44,8 +44,8 @@ async function sheetsPut(path: string, body: unknown): Promise<any> {
 export interface RenewalSheetRow {
   company: string;
   currentLicense: number | null;
-  cssaCount: number | null;
-  cssaRounded: number | null;
+  csaCount: number | null;
+  csaRounded: number | null;
   renewalCount: number;
   notes?: string;
 }
@@ -77,8 +77,8 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
   const newRow = [
     row.company,
     row.currentLicense ?? "",
-    row.cssaCount ?? "",
-    row.cssaRounded ?? "",
+    row.csaCount ?? "",
+    row.csaRounded ?? "",
     row.renewalCount,
     row.notes ?? "",
   ];
@@ -95,7 +95,7 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
     );
     await sheetsPut(
       `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(dataRange)}?valueInputOption=USER_ENTERED`,
-      { values: [["Company", "Current License", "CSSA", "CSSA Rounded", "Agreement", "Notes"]] }
+      { values: [["Company", "Current License", "CSA", "CSA Rounded", "Agreement", "Notes"]] }
     );
     const rowRange = `Sheet1!A${lastRow + 4}`;
     await sheetsPut(

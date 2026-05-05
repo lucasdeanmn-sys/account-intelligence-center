@@ -87,9 +87,9 @@ function ConfirmModal({ entry, onCancel, onConfirm }: ConfirmModalProps) {
               {entry.renewalCount?.toLocaleString() ?? "TBD"} circuits
             </p>
             <div className="flex gap-4 mt-2">
-              {entry.cssaRounded !== null && (
+              {entry.csaRounded !== null && (
                 <p className="text-xs" style={{ color: "#64748b" }}>
-                  CSA: {entry.cssaCount?.toLocaleString() ?? "—"} → rounded: {entry.cssaRounded.toLocaleString()}
+                  CSA: {entry.csaCount?.toLocaleString() ?? "—"} → rounded: {entry.csaRounded.toLocaleString()}
                 </p>
               )}
               {entry.orderFormLicense !== null && (
@@ -245,7 +245,7 @@ function DealRow({ entry, onProcess }: DealRowProps) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <p className="text-sm font-semibold text-white truncate">{entry.company}</p>
-            {entry.orderFormLicense === null && entry.cssaCount === null && (
+            {entry.orderFormLicense === null && entry.csaCount === null && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f59e0b15", color: "#f59e0b" }}>
                 No M1 data
               </span>
@@ -266,12 +266,12 @@ function DealRow({ entry, onProcess }: DealRowProps) {
           </div>
           <div className="text-right w-20">
             <p className="text-sm font-medium text-white">
-              {entry.cssaCount !== null ? entry.cssaCount.toLocaleString() : "—"}
+              {entry.csaCount !== null ? entry.csaCount.toLocaleString() : "—"}
             </p>
           </div>
           <div className="text-right w-24">
             <p className="text-sm font-medium text-white">
-              {entry.cssaRounded?.toLocaleString() ?? "—"}
+              {entry.csaRounded?.toLocaleString() ?? "—"}
             </p>
           </div>
           <div className="text-right w-28">
@@ -315,7 +315,7 @@ function DealRow({ entry, onProcess }: DealRowProps) {
       {/* Mobile data */}
       <div className="flex sm:hidden gap-4 px-4 pb-3 text-sm">
         <span style={{ color: "#64748b" }}>OF: <span className="text-white">{entry.orderFormLicense?.toLocaleString() ?? "—"}</span></span>
-        <span style={{ color: "#64748b" }}>CSA: <span className="text-white">{entry.cssaCount?.toLocaleString() ?? "—"}</span></span>
+        <span style={{ color: "#64748b" }}>CSA: <span className="text-white">{entry.csaCount?.toLocaleString() ?? "—"}</span></span>
         <span style={{ color: "#64748b" }}>Renewal: <span style={{ color: "#a5b4fc", fontWeight: 600 }}>{entry.renewalCount?.toLocaleString() ?? "—"}</span></span>
       </div>
 
@@ -379,8 +379,8 @@ export default function MSITrackerPage() {
         expirationDate: entry.expirationDate,
         company: entry.company,
         orderFormLicense: entry.orderFormLicense,
-        cssaCount: entry.cssaCount,
-        cssaRounded: entry.cssaRounded,
+        csaCount: entry.csaCount,
+        csaRounded: entry.csaRounded,
       }),
     });
     const data = await res.json();

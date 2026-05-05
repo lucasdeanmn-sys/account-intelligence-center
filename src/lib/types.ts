@@ -88,7 +88,7 @@ export type MSIFlag =
   | "circuit_discrepancy"
   | "renewal_imminent"
   | "renewal_overdue"
-  | "cssa_unavailable";
+  | "csa_unavailable";
 
 export interface NotePreview {
   dealId: string;
@@ -103,8 +103,8 @@ export interface RenewalEntry {
   msiYear: number | null;
   nextMsiYear: number | null;
   orderFormLicense: number | null;
-  cssaCount: number | null;
-  cssaRounded: number | null;
+  csaCount: number | null;
+  csaRounded: number | null;
   renewalCount: number | null;
   renewalDealId: string | null;
   renewalDealName: string;

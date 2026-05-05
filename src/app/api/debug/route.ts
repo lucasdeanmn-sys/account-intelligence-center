@@ -6,7 +6,7 @@ export async function GET() {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   const hubspotToken = process.env.HUBSPOT_ACCESS_TOKEN;
   const googleToken = process.env.GOOGLE_OAUTH_TOKEN;
-  const cssaKey = process.env.CSSA_API_KEY;
+  const csaKey = process.env.CSA_API_KEY;
 
   return NextResponse.json({
     ANTHROPIC_API_KEY: anthropicKey
@@ -14,6 +14,6 @@ export async function GET() {
       : "NOT SET",
     HUBSPOT_ACCESS_TOKEN: hubspotToken ? "set" : "NOT SET",
     GOOGLE_OAUTH_TOKEN: googleToken ? "set" : "NOT SET",
-    CSSA_API_KEY: cssaKey ? "set" : "NOT SET",
+    CSA_API_KEY: csaKey ? "set" : "NOT SET",
   });
 }
