@@ -3,7 +3,7 @@ import { callClaude, runAgentLoop, csaServer, configured, extractJSON } from "@/
 import { getMsiDealsByStartDate, getDealNotes, getDealLineItems } from "@/lib/hubspot";
 import type { RenewalEntry } from "@/lib/types";
 
-export const maxDuration = 120;
+export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 function extractCompany(dealName: string): string {

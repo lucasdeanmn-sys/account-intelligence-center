@@ -362,7 +362,13 @@ export default function MSITrackerPage() {
     setDeals([]);
     try {
       const res = await fetch(`/api/msi-renewals?month=${month}&year=${year}`);
-      const data = await res.json();
+      const text = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`API error: ${text.slice(0, 300)}`);
+      }
       if (!res.ok) throw new Error(data.error || "Failed to fetch renewals");
       setDeals(data.deals ?? []);
       setExpirationDate(data.expirationDate ?? "");
