@@ -333,8 +333,18 @@ function DealRow({ entry, onProcess }: DealRowProps) {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+const currentYear = new Date().getFullYear();
+const YEARS = Array.from({ length: 5 }, (_, i) => currentYear - 1 + i);
+
 export default function MSITrackerPage() {
-  const [startDate, setStartDate] = useState("");
+  const now = new Date();
+  const [month, setMonth] = useState(String(now.getMonth() + 1)); // 1-12
+  const [year, setYear] = useState(String(now.getFullYear()));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deals, setDeals] = useState<RenewalEntry[]>([]);
@@ -346,12 +356,12 @@ export default function MSITrackerPage() {
   const [emailLoading, setEmailLoading] = useState(false);
 
   async function runReport() {
-    if (!startDate) return;
+    if (!month || !year) return;
     setLoading(true);
     setError(null);
     setDeals([]);
     try {
-      const res = await fetch(`/api/msi-renewals?startDate=${startDate}`);
+      const res = await fetch(`/api/msi-renewals?month=${month}&year=${year}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to fetch renewals");
       setDeals(data.deals ?? []);
@@ -430,28 +440,45 @@ export default function MSITrackerPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-white">MSI Renewal Processing</h1>
         <p className="text-sm mt-0.5" style={{ color: "#64748b" }}>
-          Enter the subscription start date of the deals expiring this month
+          Select the month and year deals are expiring to generate the renewal report
         </p>
       </div>
 
-      {/* Date picker */}
+      {/* Month / Year picker */}
       <div className="flex items-end gap-3 mb-6">
         <div>
           <label className="block text-xs font-medium mb-1.5" style={{ color: "#64748b" }}>
-            Subscription Start Date
+            Expiration Month
           </label>
-          <input
-            type="date"
-            value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && runReport()}
-            className="px-3 py-2 rounded-lg border text-sm text-white bg-transparent focus:outline-none focus:border-indigo-500"
+          <select
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            className="px-3 py-2 rounded-lg border text-sm text-white focus:outline-none focus:border-indigo-500"
             style={{ borderColor: "#252836", backgroundColor: "#1a1d27" }}
-          />
+          >
+            {MONTHS.map((m, i) => (
+              <option key={m} value={String(i + 1)}>{m}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-medium mb-1.5" style={{ color: "#64748b" }}>
+            Year
+          </label>
+          <select
+            value={year}
+            onChange={(e) => setYear(e.target.value)}
+            className="px-3 py-2 rounded-lg border text-sm text-white focus:outline-none focus:border-indigo-500"
+            style={{ borderColor: "#252836", backgroundColor: "#1a1d27" }}
+          >
+            {YEARS.map((y) => (
+              <option key={y} value={String(y)}>{y}</option>
+            ))}
+          </select>
         </div>
         <button
           onClick={runReport}
-          disabled={!startDate || loading}
+          disabled={loading}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
           style={{ backgroundColor: "#6366f1", color: "white" }}
         >
@@ -526,9 +553,9 @@ export default function MSITrackerPage() {
       {!loading && deals.length === 0 && !error && (
         <div className="text-center py-16" style={{ color: "#64748b" }}>
           <Search size={32} className="mx-auto mb-3 opacity-40" />
-          <p className="text-sm">Enter a subscription start date and run the report</p>
+          <p className="text-sm">Select the expiration month and year, then run the report</p>
           <p className="text-xs mt-1">
-            e.g., enter <span className="text-white">06/01/2025</span> to see deals expiring 05/31/2026
+            e.g., <span className="text-white">May 2026</span> finds all MSI deals expiring 05/31/2026
           </p>
         </div>
       )}

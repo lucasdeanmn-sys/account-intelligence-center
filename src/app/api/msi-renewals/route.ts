@@ -59,12 +59,32 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "HubSpot not configured" }, { status: 503 });
   }
 
-  const startDate = req.nextUrl.searchParams.get("startDate");
-  if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-    return NextResponse.json({ error: "startDate required (YYYY-MM-DD)" }, { status: 400 });
+  const monthParam = req.nextUrl.searchParams.get("month");
+  const yearParam = req.nextUrl.searchParams.get("year");
+  // Also accept legacy startDate param
+  const startDateParam = req.nextUrl.searchParams.get("startDate");
+
+  if (!monthParam && !yearParam && !startDateParam) {
+    return NextResponse.json({ error: "month and year required" }, { status: 400 });
   }
 
   try {
+    let startDate: string;
+
+    if (startDateParam) {
+      startDate = startDateParam;
+    } else {
+      const month = parseInt(monthParam!, 10); // 1–12, the expiration month
+      const year = parseInt(yearParam!, 10);
+      if (!month || !year || month < 1 || month > 12) {
+        return NextResponse.json({ error: "valid month (1-12) and year required" }, { status: 400 });
+      }
+      // Expiration = last day of selected month; subscription started same month+1, one year prior
+      const nextMonth = month === 12 ? 1 : month + 1;
+      const nextYear = month === 12 ? year + 1 : year;
+      startDate = `${nextYear - 1}-${String(nextMonth).padStart(2, "0")}-01`;
+    }
+
     const renewalStartDate = addOneYear(startDate);
     const expirationDate = lastDayOfPreviousMonth(renewalStartDate);
 

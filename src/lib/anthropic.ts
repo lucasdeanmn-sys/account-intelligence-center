@@ -7,7 +7,7 @@ function getClient() {
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 }
 
-export const MODEL = "claude-sonnet-4-5";
+export const MODEL = "claude-sonnet-4-6";
 export const MCP_BETA = "mcp-client-2025-04-04";
 export const HUBSPOT_OWNER_ID = "32225666";
 
