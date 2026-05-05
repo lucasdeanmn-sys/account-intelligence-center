@@ -28,27 +28,32 @@ function addOneYear(isoDate: string): string {
   return d.toISOString().split("T")[0];
 }
 
-const M1_PARSE_SYSTEM = `You are parsing HubSpot M1 renewal notes for MSI deals.
-Each note is in HTML format. The note title is "1 Year Renewal M1 Order Form:" followed by bullet points listing MSI years.
+const M1_PARSE_SYSTEM = `You are parsing HubSpot M1 order form notes for MSI deals.
+Each note is in HTML format. The note title contains "M1 Order Form:" (e.g. "3 Year M1 Order Form:", "5 Year M1 Order Form:").
 
 Bullet format:
-  "MSI Year N - X,XXX"              → order form license = X,XXX
-  "MSI Year N - X,XXX (Y,YYY) ..." → X,XXX is the renewal count, Y,YYY is the ORDER FORM license
+  "MSI Year N - X,XXX"                   → license = X,XXX
+  "MSI Year N - X,XXX (Y,YYY) ..."       → X,XXX is CSSA-adjusted count, Y,YYY is the ORDER FORM license
+  "MSI Year N - X,XXX (Auto-renew)"      → license = X,XXX
+  Extra text in parens like "(14 month term)" is metadata — ignore it for the license number.
 
 Italic bullets (<i> or <em> text) = already invoiced.
 Non-italic = not yet invoiced.
 
-For each deal, extract:
+For each deal, find the best matching M1 note and extract:
 - msiYear: current deal year number (from the deal name field provided)
 - nextMsiYear: msiYear + 1
-- orderFormLicense: license count from the M1 note for nextMsiYear
-  * If the note has "MSI Year [nextMsiYear] - X (Y)", return Y as orderFormLicense
-  * If the note has "MSI Year [nextMsiYear] - X" (no parenthetical), return X
-  * If nextMsiYear entry not found in note, return null
+- orderFormLicense: license from the note for nextMsiYear
+  * Non-italic entry "MSI Year [nextMsiYear] - X (Y)": return Y
+  * Non-italic entry "MSI Year [nextMsiYear] - X": return X
+  * No entry for nextMsiYear (or only italic): return null
+- currentYearLicense: license from the ITALIC entry for msiYear (the last invoiced year).
+  Use this as the auto-renew fallback when orderFormLicense is null.
+  If no italic entry for msiYear, return null.
 - m1NoteHtml: full HTML of the best matching note
 
 Return ONLY valid JSON array:
-[{"dealId":"...","msiYear":4,"nextMsiYear":5,"orderFormLicense":2000,"m1NoteHtml":"..."}]`;
+[{"dealId":"...","msiYear":4,"nextMsiYear":5,"orderFormLicense":2000,"currentYearLicense":1500,"m1NoteHtml":"..."}]`;
 
 
 async function fetchNotesBatched(deals: any[]): Promise<{ dealId: string; notes: any[] }[]> {
@@ -156,6 +161,7 @@ export async function GET(req: NextRequest) {
         msiYear: extractYearFromName(d.properties?.dealname ?? ""),
         nextMsiYear: null,
         orderFormLicense: null,
+        currentYearLicense: null,
         m1NoteHtml: null,
       }));
     }
@@ -169,13 +175,17 @@ export async function GET(req: NextRequest) {
       const msiYear = parsed.msiYear ?? extractYearFromName(deal.properties?.dealname ?? "");
       const nextMsiYear = msiYear ? msiYear + 1 : null;
       const orderFormLicense: number | null = parsed.orderFormLicense ?? null;
+      // Auto-renew fallback: last invoiced year's license when no next-year entry exists
+      const currentYearLicense: number | null = parsed.currentYearLicense ?? null;
 
       const csaCount: number | null = null;
       const csaRounded: number | null = null;
 
+      // Base = order form license OR current year license (auto-renew fallback)
+      const licenseFallback = orderFormLicense ?? currentYearLicense;
       const renewalCount =
-        csaRounded !== null || orderFormLicense !== null
-          ? Math.max(csaRounded ?? 0, orderFormLicense ?? 0)
+        csaRounded !== null || licenseFallback !== null
+          ? Math.max(csaRounded ?? 0, licenseFallback ?? 0)
           : null;
 
       const renewalDeal = renewalDealMap.get(company.toLowerCase()) ?? null;
@@ -188,6 +198,7 @@ export async function GET(req: NextRequest) {
         msiYear,
         nextMsiYear,
         orderFormLicense,
+        currentYearLicense,
         csaCount,
         csaRounded,
         renewalCount,

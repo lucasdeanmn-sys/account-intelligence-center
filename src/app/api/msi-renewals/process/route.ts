@@ -23,6 +23,7 @@ export async function POST(req: NextRequest) {
       expirationDate,
       company,
       orderFormLicense,
+      currentYearLicense,
       csaCount,
       csaRounded,
     } = await req.json();
@@ -86,7 +87,7 @@ export async function POST(req: NextRequest) {
       });
       await appendRenewalRow(monthLabel, {
         company,
-        currentLicense: orderFormLicense ?? null,
+        currentLicense: orderFormLicense ?? currentYearLicense ?? null,
         csaCount: csaCount ?? null,
         csaRounded: csaRounded ?? null,
         renewalCount,

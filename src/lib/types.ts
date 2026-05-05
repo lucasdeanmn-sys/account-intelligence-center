@@ -103,6 +103,7 @@ export interface RenewalEntry {
   msiYear: number | null;
   nextMsiYear: number | null;
   orderFormLicense: number | null;
+  currentYearLicense: number | null;
   csaCount: number | null;
   csaRounded: number | null;
   renewalCount: number | null;

@@ -278,9 +278,16 @@ export async function getClosedWonStage(pipelineNameSubstring: string): Promise<
     p.label?.toLowerCase().includes(pipelineNameSubstring.toLowerCase())
   );
   if (!pipeline) return null;
-  const closedWon = (pipeline.stages ?? []).find((s: any) =>
-    s.metadata?.isClosed === "true" && s.metadata?.probability === "1.0"
-  );
+  const stages: any[] = pipeline.stages ?? [];
+  // Prefer "Ready for Billing" stage; fall back to any closed-won stage
+  const closedWon =
+    stages.find((s: any) =>
+      s.label?.toLowerCase().includes("billing") ||
+      s.label?.toLowerCase().includes("ready for billing")
+    ) ??
+    stages.find((s: any) =>
+      s.metadata?.isClosed === "true" && s.metadata?.probability === "1.0"
+    );
   return closedWon ? { pipelineId: pipeline.id, stageId: closedWon.id } : null;
 }
 

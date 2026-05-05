@@ -243,9 +243,14 @@ function DealRow({ entry, onProcess }: DealRowProps) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <p className="text-sm font-semibold text-white truncate">{entry.company}</p>
-            {entry.orderFormLicense === null && entry.csaCount === null && (
+            {entry.orderFormLicense === null && entry.currentYearLicense !== null && (
+              <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#3b82f615", color: "#60a5fa" }}>
+                Auto-renew
+              </span>
+            )}
+            {entry.orderFormLicense === null && entry.currentYearLicense === null && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f59e0b15", color: "#f59e0b" }}>
-                No M1 data
+                No M1 note
               </span>
             )}
           </div>
@@ -394,6 +399,7 @@ export default function MSITrackerPage() {
         expirationDate: entry.expirationDate,
         company: entry.company,
         orderFormLicense: entry.orderFormLicense,
+        currentYearLicense: entry.currentYearLicense,
         csaCount: entry.csaCount,
         csaRounded: entry.csaRounded,
       }),
@@ -431,8 +437,9 @@ export default function MSITrackerPage() {
         const csaCount = counts[d.company] ??
           Object.entries(counts).find(([k]) => k.toLowerCase().includes(d.company.toLowerCase().slice(0, 6)))?.[1] ?? null;
         const csaRounded = csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
-        const renewalCount = csaRounded !== null || d.orderFormLicense !== null
-          ? Math.max(csaRounded ?? 0, d.orderFormLicense ?? 0) : null;
+        const licenseFallback = d.orderFormLicense ?? d.currentYearLicense ?? null;
+        const renewalCount = csaRounded !== null || licenseFallback !== null
+          ? Math.max(csaRounded ?? 0, licenseFallback ?? 0) : null;
         return { ...d, csaCount, csaRounded, renewalCount };
       }));
     } catch (e: any) {
