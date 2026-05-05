@@ -1,47 +1,101 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentLoop, csaServer, configured, extractJSON } from "@/lib/anthropic";
+import { MCP_BETA, MODEL } from "@/lib/anthropic";
 
 export const maxDuration = 60;
 
-// get_snapshot returns all companies at once — one tool call, then we filter.
-// Each record has: instance, expire_date, current_circuits
-const CSA_SYSTEM = `You have access to CSA tools.
+interface CsaRecord {
+  instance: string;
+  expire_date: string;
+  current_circuits: number;
+}
 
-Call get_snapshot ONCE to retrieve all company data. Do not call it multiple times.
+function matchCompany(company: string, records: CsaRecord[]): number | null {
+  const needle = company.toLowerCase().trim();
 
-From the snapshot results, find each company in the provided list by matching against
-the "instance" field (fuzzy/partial match is fine). Extract the "current_circuits" value
-for each match.
+  // Exact match
+  let hit = records.find((r) => r.instance.toLowerCase().trim() === needle);
+  if (hit) return hit.current_circuits ?? null;
 
-Return ONLY a valid JSON object mapping each input company name to its current_circuits
-value (use null if not found):
-{"Company Name": 12345, "Another Co": null}
+  // One contains the other
+  hit = records.find(
+    (r) =>
+      r.instance.toLowerCase().includes(needle) ||
+      needle.includes(r.instance.toLowerCase())
+  );
+  if (hit) return hit.current_circuits ?? null;
 
-Return the JSON only — no explanation, no markdown.`;
+  // First 6 chars
+  hit = records.find((r) =>
+    r.instance.toLowerCase().startsWith(needle.slice(0, 6))
+  );
+  return hit?.current_circuits ?? null;
+}
 
 export async function POST(req: NextRequest) {
-  const csaServers = configured(csaServer());
-  if (!csaServers.length) {
-    return NextResponse.json({ error: "CSA not configured" }, { status: 503 });
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json({ error: "ANTHROPIC_API_KEY not configured" }, { status: 503 });
   }
 
   try {
-    const { companies } = await req.json() as { companies: string[] };
+    const { companies } = (await req.json()) as { companies: string[] };
     if (!companies?.length) {
       return NextResponse.json({ error: "companies array required" }, { status: 400 });
     }
 
-    const result = await runAgentLoop(
-      CSA_SYSTEM,
-      `Find current_circuits for each of these companies using get_snapshot:\n${JSON.stringify(companies)}`,
-      csaServers,
-      4096
-    );
+    // Single API call — Anthropic calls the MCP server server-side
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": MCP_BETA,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 8096,
+        system: "Call get_snapshot once to retrieve all company data. Do not call any other tools.",
+        messages: [{ role: "user", content: "Call get_snapshot." }],
+        mcp_servers: [
+          {
+            type: "url",
+            url: "https://computed-success-analysis-mcp-production.up.railway.app/sse",
+            name: "csa",
+            ...(process.env.CSA_API_KEY
+              ? { authorization_token: process.env.CSA_API_KEY }
+              : {}),
+          },
+        ],
+      }),
+    });
 
-    const counts = extractJSON<Record<string, number | null>>(result);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Anthropic API error ${res.status}: ${err.slice(0, 300)}`);
+    }
+
+    const data = await res.json();
+
+    // Extract the mcp_tool_result block
+    const toolResult = data.content?.find((b: any) => b.type === "mcp_tool_result");
+    if (!toolResult) {
+      throw new Error("No mcp_tool_result in response — get_snapshot may not have been called");
+    }
+
+    const raw: CsaRecord[] = JSON.parse(toolResult.content[0].text);
+
+    // Match each company to its circuit count
+    const counts: Record<string, number | null> = {};
+    for (const company of companies) {
+      counts[company] = matchCompany(company, raw);
+    }
+
     return NextResponse.json({ counts });
   } catch (error: any) {
     console.error("CSA lookup error:", error);
-    return NextResponse.json({ error: error.message || "CSA lookup failed" }, { status: 500 });
+    return NextResponse.json(
+      { error: error.message || "CSA lookup failed" },
+      { status: 500 }
+    );
   }
 }
