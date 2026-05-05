@@ -243,12 +243,17 @@ function DealRow({ entry, onProcess }: DealRowProps) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <p className="text-sm font-semibold text-white truncate">{entry.company}</p>
-            {entry.orderFormLicense === null && entry.currentYearLicense !== null && (
+            {entry.isExtension && (
+              <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#a855f715", color: "#c084fc" }}>
+                Extension
+              </span>
+            )}
+            {!entry.isExtension && entry.orderFormLicense === null && entry.currentYearLicense !== null && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#3b82f615", color: "#60a5fa" }}>
                 Auto-renew
               </span>
             )}
-            {entry.orderFormLicense === null && entry.currentYearLicense === null && (
+            {!entry.isExtension && entry.orderFormLicense === null && entry.currentYearLicense === null && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f59e0b15", color: "#f59e0b" }}>
                 No M1 note
               </span>

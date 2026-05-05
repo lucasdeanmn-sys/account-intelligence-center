@@ -23,8 +23,10 @@ export async function POST(req: NextRequest) {
     }
 
     const sorted = [...deals].sort((a, b) => a.company.localeCompare(b.company));
+    const renewals = sorted.filter((d) => !d.isExtension);
+    const extensions = sorted.filter((d) => d.isExtension);
 
-    const lines = sorted.map((d) => {
+    const formatLine = (d: RenewalEntry) => {
       const count = d.renewalCount?.toLocaleString() ?? "TBD";
       const orderForm = d.orderFormLicense?.toLocaleString();
       const suffix =
@@ -34,22 +36,36 @@ export async function POST(req: NextRequest) {
           ? ` (${orderForm})`
           : "";
       return `${d.company} - ${count}${suffix}`;
-    });
+    };
 
     const subject = `MSI ${monthLabel} Renewal`;
 
-    const body = [
+    const bodyParts = [
       `Hi Team,`,
       ``,
       `Please see the ${monthLabel} MSI renewal list below. Licenses have been updated in NOC360 accordingly.`,
       ``,
-      ...lines,
+      ...renewals.map(formatLine),
+    ];
+
+    if (extensions.length) {
+      bodyParts.push(
+        ``,
+        `The following accounts have MSI Extensions expiring this month:`,
+        ``,
+        ...extensions.map((d) => d.company)
+      );
+    }
+
+    bodyParts.push(
       ``,
       `Please let me know if you have any questions.`,
       ``,
       `Thanks,`,
-      `Luke`,
-    ].join("\n");
+      `Luke`
+    );
+
+    const body = bodyParts.join("\n");
 
     return NextResponse.json({
       subject,

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callClaude, extractJSON } from "@/lib/anthropic";
-import { getMsiDealsByStartDate, getDealNotes, getClosedWonStage } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getDealNotes } from "@/lib/hubspot";
 import type { RenewalEntry } from "@/lib/types";
 
 export const maxDuration = 60;
@@ -106,13 +106,10 @@ export async function GET(req: NextRequest) {
     const renewalStartDate = addOneYear(startDate);
     const expirationDate = lastDayOfPreviousMonth(renewalStartDate);
 
-    // 1. Fetch current (expiring) deals and renewal deals, restricted to renewal pipeline
-    const pipelineInfo = await getClosedWonStage("renewal").catch(() => null);
-    const pipelineId = pipelineInfo?.pipelineId;
-
+    // 1. Fetch all MSI deals (including extensions) for this start date
     const [currentDeals, renewalDeals] = await Promise.all([
-      getMsiDealsByStartDate(startDate, pipelineId),
-      getMsiDealsByStartDate(renewalStartDate, pipelineId),
+      getMsiDealsByStartDate(startDate),
+      getMsiDealsByStartDate(renewalStartDate),
     ]);
 
     // Filter to only deals with "(MSI" in the name
@@ -205,10 +202,14 @@ export async function GET(req: NextRequest) {
       const renewalDeal = renewalDealMap.get(company.toLowerCase()) ?? null;
       const renewalDealName = `${company} (MSI - Year ${nextMsiYear ?? "?"})`;
 
+      const dealName = deal.properties?.dealname ?? "";
+      const isExtension = /extension/i.test(dealName);
+
       return {
         currentDealId: deal.id,
-        currentDealName: deal.properties?.dealname ?? "",
+        currentDealName: dealName,
         company,
+        isExtension,
         msiYear,
         nextMsiYear,
         orderFormLicense,

@@ -100,6 +100,7 @@ export interface RenewalEntry {
   currentDealId: string;
   currentDealName: string;
   company: string;
+  isExtension: boolean;
   msiYear: number | null;
   nextMsiYear: number | null;
   orderFormLicense: number | null;
