@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callClaude, runAgentLoop, csaServer, configured, extractJSON } from "@/lib/anthropic";
-import { getMsiDealsByStartDate, getDealNotes, getDealLineItems } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getDealNotes } from "@/lib/hubspot";
 import type { RenewalEntry } from "@/lib/types";
 
 export const maxDuration = 60;
@@ -53,6 +53,22 @@ Return ONLY valid JSON array:
 const CSA_SYSTEM = `You have access to CSA tools. For each company name provided, query CSA to get the current circuit/subscriber count.
 Return ONLY valid JSON mapping company names to counts (use null if not found):
 {"Company Name": 12345, "Another Co": null}`;
+
+async function fetchNotesBatched(deals: any[]): Promise<{ dealId: string; notes: any[] }[]> {
+  const results: { dealId: string; notes: any[] }[] = [];
+  const BATCH = 5;
+  for (let i = 0; i < deals.length; i += BATCH) {
+    const batch = deals.slice(i, i + BATCH);
+    const batchResults = await Promise.all(
+      batch.map(async (deal: any) => ({
+        dealId: deal.id,
+        notes: await getDealNotes(deal.id).catch(() => []),
+      }))
+    );
+    results.push(...batchResults);
+  }
+  return results;
+}
 
 export async function GET(req: NextRequest) {
   if (!process.env.HUBSPOT_ACCESS_TOKEN) {
@@ -112,23 +128,15 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // 2. Fetch M1 notes and line items for current deals in parallel
-    const notesAndItems = await Promise.all(
-      filtered.map(async (deal: any) => {
-        const [notes, lineItems] = await Promise.all([
-          getDealNotes(deal.id).catch(() => []),
-          getDealLineItems(deal.id).catch(() => []),
-        ]);
-        return { dealId: deal.id, notes, lineItems };
-      })
-    );
+    // 2. Fetch M1 notes for current deals — batched to avoid HubSpot rate limits
+    const notesAndItems = await fetchNotesBatched(filtered);
 
     // 3. Parse M1 notes with Claude
     const noteInput = filtered.map((deal: any, i: number) => ({
       dealId: deal.id,
       dealName: deal.properties?.dealname ?? "",
       msiYear: extractYearFromName(deal.properties?.dealname ?? ""),
-      notes: (notesAndItems[i]?.notes ?? [])
+      notes: (notesAndItems.find(n => n.dealId === deal.id)?.notes ?? [])
         .sort((a: any, b: any) =>
           new Date(b.properties?.hs_timestamp ?? 0).getTime() -
           new Date(a.properties?.hs_timestamp ?? 0).getTime()
