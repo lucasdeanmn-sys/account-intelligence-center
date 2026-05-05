@@ -29,7 +29,7 @@ function addOneYear(isoDate: string): string {
 }
 
 const M1_PARSE_SYSTEM = `You are parsing HubSpot M1 order form notes for MSI deals.
-Each note is in HTML format. The note title contains "M1 Order Form:" (e.g. "3 Year M1 Order Form:", "5 Year M1 Order Form:").
+Each note is in HTML format. Find the note whose content contains "M1 Order Form" (case-insensitive). The exact title varies (e.g. "3 Year M1 Order Form:", "M1 Order Form:", "5 Year M1 Order Form:") — match on the substring "M1 Order Form".
 
 Bullet format:
   "MSI Year N - X,XXX"                   → license = X,XXX
@@ -138,13 +138,24 @@ export async function GET(req: NextRequest) {
       dealId: deal.id,
       dealName: deal.properties?.dealname ?? "",
       msiYear: extractYearFromName(deal.properties?.dealname ?? ""),
-      notes: (notesAndItems.find(n => n.dealId === deal.id)?.notes ?? [])
-        .sort((a: any, b: any) =>
-          new Date(b.properties?.hs_timestamp ?? 0).getTime() -
-          new Date(a.properties?.hs_timestamp ?? 0).getTime()
-        )
-        .slice(0, 5)
-        .map((n: any) => ({ body: n.properties?.hs_note_body ?? "", timestamp: n.properties?.hs_timestamp })),
+      notes: (() => {
+        const all = notesAndItems.find(n => n.dealId === deal.id)?.notes ?? [];
+        const m1Notes = all.filter((n: any) =>
+          (n.properties?.hs_note_body ?? "").toLowerCase().includes("m1 order form")
+        );
+        // Always include M1 notes; fill remaining slots with most-recent others
+        const others = all
+          .filter((n: any) => !m1Notes.includes(n))
+          .sort((a: any, b: any) =>
+            new Date(b.properties?.hs_timestamp ?? 0).getTime() -
+            new Date(a.properties?.hs_timestamp ?? 0).getTime()
+          )
+          .slice(0, Math.max(0, 5 - m1Notes.length));
+        return [...m1Notes, ...others].map((n: any) => ({
+          body: n.properties?.hs_note_body ?? "",
+          timestamp: n.properties?.hs_timestamp,
+        }));
+      })(),
     }));
 
     let parsedNotes: any[] = [];
