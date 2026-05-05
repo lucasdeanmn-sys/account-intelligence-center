@@ -248,17 +248,23 @@ export async function searchProducts(name: string): Promise<any[]> {
 
 // ─── MSI Renewal helpers ──────────────────────────────────────────────────────
 
-export async function getMsiDealsByStartDate(isoDate: string): Promise<any[]> {
-  // HubSpot date properties store midnight UTC as timestamp ms
+export async function getMsiDealsByStartDate(
+  isoDate: string,
+  pipelineId?: string
+): Promise<any[]> {
   const dayStart = new Date(isoDate + "T00:00:00.000Z").getTime().toString();
   const dayEnd = new Date(isoDate + "T23:59:59.999Z").getTime().toString();
+  const filters: object[] = [
+    { propertyName: "subscription_start_date", operator: "GTE", value: dayStart },
+    { propertyName: "subscription_start_date", operator: "LTE", value: dayEnd },
+    { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+  ];
+  if (pipelineId) {
+    filters.push({ propertyName: "pipeline", operator: "EQ", value: pipelineId });
+  }
   return searchDeals(
-    [
-      { propertyName: "subscription_start_date", operator: "GTE", value: dayStart },
-      { propertyName: "subscription_start_date", operator: "LTE", value: dayEnd },
-      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
-    ],
-    ["dealname", "dealstage", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
+    filters,
+    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
     200
   );
 }
