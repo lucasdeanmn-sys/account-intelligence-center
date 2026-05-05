@@ -96,6 +96,24 @@ export interface NotePreview {
   htmlContent: string;
 }
 
+export interface RenewalEntry {
+  currentDealId: string;
+  currentDealName: string;
+  company: string;
+  msiYear: number | null;
+  nextMsiYear: number | null;
+  orderFormLicense: number | null;
+  cssaCount: number | null;
+  cssaRounded: number | null;
+  renewalCount: number | null;
+  renewalDealId: string | null;
+  renewalDealName: string;
+  renewalStartDate: string;
+  expirationDate: string;
+  m1NoteHtml: string | null;
+  processed?: boolean;
+}
+
 export interface TaskCreate {
   dealId: string;
   subject: string;

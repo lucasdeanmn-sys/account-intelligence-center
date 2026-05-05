@@ -232,6 +232,75 @@ export async function searchProducts(name: string): Promise<any[]> {
   return res.results ?? [];
 }
 
+// ─── MSI Renewal helpers ──────────────────────────────────────────────────────
+
+export async function getMsiDealsByStartDate(isoDate: string): Promise<any[]> {
+  // HubSpot date properties store midnight UTC as timestamp ms
+  const dayStart = new Date(isoDate + "T00:00:00.000Z").getTime().toString();
+  const dayEnd = new Date(isoDate + "T23:59:59.999Z").getTime().toString();
+  return searchDeals(
+    [
+      { propertyName: "subscription_start_date", operator: "GTE", value: dayStart },
+      { propertyName: "subscription_start_date", operator: "LTE", value: dayEnd },
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+    ],
+    ["dealname", "dealstage", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
+    200
+  );
+}
+
+export async function getDealLineItems(dealId: string): Promise<any[]> {
+  const assoc = await hs("GET", `/crm/v4/objects/deals/${dealId}/associations/line_items`).catch(() => ({ results: [] }));
+  const ids: string[] = (assoc.results ?? []).map((r: any) => String(r.toObjectId));
+  if (!ids.length) return [];
+  const batch = await hs("POST", "/crm/v3/objects/line_items/batch/read", {
+    inputs: ids.map((id) => ({ id })),
+    properties: ["name", "quantity", "price", "amount", "hs_product_id"],
+  }).catch(() => ({ results: [] }));
+  return batch.results ?? [];
+}
+
+export async function updateLineItem(lineItemId: string, quantity: number) {
+  return hs("PATCH", `/crm/v3/objects/line_items/${lineItemId}`, {
+    properties: { quantity: String(quantity) },
+  });
+}
+
+export async function updateDealProperties(dealId: string, properties: Record<string, string>) {
+  return hs("PATCH", `/crm/v3/objects/deals/${dealId}`, { properties });
+}
+
+// Returns { pipelineId, stageId } for the Closed Won stage in the named pipeline
+export async function getClosedWonStage(pipelineNameSubstring: string): Promise<{ pipelineId: string; stageId: string } | null> {
+  const res = await hs("GET", "/crm/v3/pipelines/deals");
+  const pipelines: any[] = res.results ?? [];
+  const pipeline = pipelines.find((p: any) =>
+    p.label?.toLowerCase().includes(pipelineNameSubstring.toLowerCase())
+  );
+  if (!pipeline) return null;
+  const closedWon = (pipeline.stages ?? []).find((s: any) =>
+    s.metadata?.isClosed === "true" && s.metadata?.probability === "1.0"
+  );
+  return closedWon ? { pipelineId: pipeline.id, stageId: closedWon.id } : null;
+}
+
+export async function createMsiRenewalDeal(
+  name: string,
+  subscriptionStartDate: string,
+  ownerId: string,
+  pipelineId?: string,
+  stageId?: string
+) {
+  const properties: Record<string, string> = {
+    dealname: name,
+    hubspot_owner_id: ownerId,
+    subscription_start_date: new Date(subscriptionStartDate + "T00:00:00.000Z").getTime().toString(),
+  };
+  if (pipelineId) properties.pipeline = pipelineId;
+  if (stageId) properties.dealstage = stageId;
+  return hs("POST", "/crm/v3/objects/deals", { properties });
+}
+
 export async function createLineItem(
   dealId: string,
   name: string,
