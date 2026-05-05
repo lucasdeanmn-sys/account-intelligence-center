@@ -8,6 +8,7 @@ import {
 } from "@/lib/hubspot";
 import { appendRenewalRow } from "@/lib/sheets";
 import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
+import { googleConfigured } from "@/lib/google";
 
 export const maxDuration = 60;
 
@@ -77,7 +78,7 @@ export async function POST(req: NextRequest) {
     });
 
     // 5. Append to Google Sheet (best-effort)
-    if (process.env.GOOGLE_OAUTH_TOKEN && company) {
+    if (googleConfigured() && company) {
       const monthLabel = new Date(expirationDate + "T00:00:00.000Z").toLocaleString("en-US", {
         month: "long",
         year: "numeric",

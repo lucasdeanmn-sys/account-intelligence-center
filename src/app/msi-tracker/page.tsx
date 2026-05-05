@@ -117,12 +117,10 @@ function ConfirmModal({ entry, onCancel, onConfirm }: ConfirmModalProps) {
                 {" → "}{expDate}
               </span>
             </div>
-            {process.env.NEXT_PUBLIC_HAS_GOOGLE === "true" && (
-              <div className="flex items-center gap-2 text-sm">
-                <CheckCircle size={13} style={{ color: "#22c55e" }} />
-                <span style={{ color: "#94a3b8" }}>Append row to MSI Renewal/Term Worksheet</span>
-              </div>
-            )}
+            <div className="flex items-center gap-2 text-sm">
+              <CheckCircle size={13} style={{ color: "#22c55e" }} />
+              <span style={{ color: "#94a3b8" }}>Append row to MSI Renewal/Term Worksheet</span>
+            </div>
           </div>
 
           {error && (

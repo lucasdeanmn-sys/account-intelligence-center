@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { getGoogleToken, googleConfigured } from "./google";
 
 // Do NOT initialize at module level — Next.js serverless bundling can
 // evaluate module-level code before env vars are injected at runtime.
@@ -29,23 +30,25 @@ export function hubspotServer(): MCPServer | null {
   };
 }
 
-export function gmailServer(): MCPServer | null {
-  if (!process.env.GOOGLE_OAUTH_TOKEN) return null;
+export async function gmailServer(): Promise<MCPServer | null> {
+  if (!googleConfigured()) return null;
+  const token = await getGoogleToken();
   return {
     type: "url",
     url: "https://gmailmcp.googleapis.com/mcp/v1",
     name: "gmail",
-    authorization_token: `Bearer ${process.env.GOOGLE_OAUTH_TOKEN}`,
+    authorization_token: `Bearer ${token}`,
   };
 }
 
-export function calendarServer(): MCPServer | null {
-  if (!process.env.GOOGLE_OAUTH_TOKEN) return null;
+export async function calendarServer(): Promise<MCPServer | null> {
+  if (!googleConfigured()) return null;
+  const token = await getGoogleToken();
   return {
     type: "url",
     url: "https://calendarmcp.googleapis.com/mcp/v1",
     name: "calendar",
-    authorization_token: `Bearer ${process.env.GOOGLE_OAUTH_TOKEN}`,
+    authorization_token: `Bearer ${token}`,
   };
 }
 

@@ -1,25 +1,23 @@
+import { getGoogleToken } from "./google";
+
 const SHEET_ID = "1qkiazR_nrcWAXgfk1BOR8z0lP00s2MLh40ieEj4onC4";
 const BASE = "https://sheets.googleapis.com/v4";
 
-function token() {
-  const t = process.env.GOOGLE_OAUTH_TOKEN;
-  if (!t) throw new Error("GOOGLE_OAUTH_TOKEN not configured");
-  return t;
-}
-
 async function sheetsGet(path: string): Promise<any> {
+  const token = await getGoogleToken();
   const res = await fetch(`${BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token()}` },
+    headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error(`Sheets GET error ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
 async function sheetsPost(path: string, body: unknown): Promise<any> {
+  const token = await getGoogleToken();
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token()}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
@@ -29,10 +27,11 @@ async function sheetsPost(path: string, body: unknown): Promise<any> {
 }
 
 async function sheetsPut(path: string, body: unknown): Promise<any> {
+  const token = await getGoogleToken();
   const res = await fetch(`${BASE}${path}`, {
     method: "PUT",
     headers: {
-      Authorization: `Bearer ${token()}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
