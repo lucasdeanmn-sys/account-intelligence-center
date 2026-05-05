@@ -41,7 +41,7 @@ export async function searchDeals(
 }
 
 export async function getDealNotes(dealId: string): Promise<any[]> {
-  // v4 uses toObjectId (number); v3 uses id (string) — try both
+  // Try CRM v4 associations (toObjectId)
   let assoc = await hs(
     "GET",
     `/crm/v4/objects/deals/${dealId}/associations/notes`
@@ -50,6 +50,7 @@ export async function getDealNotes(dealId: string): Promise<any[]> {
     .map((r: any) => String(r.toObjectId))
     .filter((id: string) => id && id !== "undefined");
 
+  // Fall back to CRM v3 associations (id)
   if (!ids.length) {
     assoc = await hs(
       "GET",
@@ -60,12 +61,29 @@ export async function getDealNotes(dealId: string): Promise<any[]> {
       .filter((id: string) => Boolean(id));
   }
 
-  if (!ids.length) return [];
-  const batch = await hs("POST", "/crm/v3/objects/notes/batch/read", {
-    inputs: ids.map((id) => ({ id })),
-    properties: ["hs_note_body", "hs_timestamp"],
-  }).catch(() => ({ results: [] }));
-  return batch.results ?? [];
+  if (ids.length) {
+    const batch = await hs("POST", "/crm/v3/objects/notes/batch/read", {
+      inputs: ids.map((id) => ({ id })),
+      properties: ["hs_note_body", "hs_timestamp"],
+    }).catch(() => ({ results: [] }));
+    if ((batch.results ?? []).length) return batch.results;
+  }
+
+  // Final fallback: legacy engagements API (notes created via older HubSpot UI)
+  const eng = await hs(
+    "GET",
+    `/engagements/v1/engagements/associated/DEAL/${dealId}/paged?limit=100`
+  ).catch(() => ({ results: [] }));
+  return (eng.results ?? [])
+    .filter((e: any) => e.engagement?.type === "NOTE")
+    .map((e: any) => ({
+      properties: {
+        hs_note_body: e.metadata?.body ?? e.metadata?.bodyHtml ?? "",
+        hs_timestamp: new Date(
+          e.engagement?.timestamp ?? e.engagement?.createdAt ?? 0
+        ).toISOString(),
+      },
+    }));
 }
 
 export async function getDealTasks(dealId: string): Promise<any[]> {
