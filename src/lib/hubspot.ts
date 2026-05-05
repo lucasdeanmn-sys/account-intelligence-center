@@ -41,11 +41,25 @@ export async function searchDeals(
 }
 
 export async function getDealNotes(dealId: string): Promise<any[]> {
-  const assoc = await hs(
+  // v4 uses toObjectId (number); v3 uses id (string) — try both
+  let assoc = await hs(
     "GET",
     `/crm/v4/objects/deals/${dealId}/associations/notes`
   ).catch(() => ({ results: [] }));
-  const ids: string[] = (assoc.results ?? []).map((r: any) => String(r.toObjectId));
+  let ids: string[] = (assoc.results ?? [])
+    .map((r: any) => String(r.toObjectId))
+    .filter((id: string) => id && id !== "undefined");
+
+  if (!ids.length) {
+    assoc = await hs(
+      "GET",
+      `/crm/v3/objects/deals/${dealId}/associations/notes`
+    ).catch(() => ({ results: [] }));
+    ids = (assoc.results ?? [])
+      .map((r: any) => String(r.id))
+      .filter((id: string) => Boolean(id));
+  }
+
   if (!ids.length) return [];
   const batch = await hs("POST", "/crm/v3/objects/notes/batch/read", {
     inputs: ids.map((id) => ({ id })),

@@ -82,7 +82,26 @@ export async function POST(req: NextRequest) {
       throw new Error("No mcp_tool_result in response — get_snapshot may not have been called");
     }
 
-    const raw: CsaRecord[] = JSON.parse(toolResult.content[0].text);
+    // content may be an array of blocks or a plain string
+    const rawText: string = Array.isArray(toolResult.content)
+      ? (toolResult.content[0]?.text ?? "")
+      : String(toolResult.content ?? "");
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      throw new Error(`CSA snapshot parse failed. Raw: ${rawText.slice(0, 300)}`);
+    }
+
+    // Handle wrapped responses: { data: [...] }, { results: [...] }, etc.
+    const raw: CsaRecord[] = Array.isArray(parsed)
+      ? parsed
+      : (parsed?.data ?? parsed?.results ?? parsed?.records ?? Object.values(parsed));
+
+    if (!Array.isArray(raw)) {
+      throw new Error(`CSA snapshot not an array. Got: ${JSON.stringify(parsed).slice(0, 300)}`);
+    }
 
     // Match each company to its circuit count
     const counts: Record<string, number | null> = {};
