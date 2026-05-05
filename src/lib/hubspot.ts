@@ -40,6 +40,40 @@ export async function searchDeals(
   return res.results ?? [];
 }
 
+async function fetchNotesByIds(ids: string[]): Promise<any[]> {
+  if (!ids.length) return [];
+  const batch = await hs("POST", "/crm/v3/objects/notes/batch/read", {
+    inputs: ids.map((id) => ({ id })),
+    properties: ["hs_note_body", "hs_timestamp"],
+  }).catch(() => ({ results: [] }));
+  return batch.results ?? [];
+}
+
+async function getCompanyNotesForDeal(dealId: string): Promise<any[]> {
+  const companyAssoc = await hs(
+    "GET",
+    `/crm/v4/objects/deals/${dealId}/associations/companies`
+  ).catch(() => ({ results: [] }));
+  const companyIds: string[] = (companyAssoc.results ?? [])
+    .map((r: any) => String(r.toObjectId ?? ""))
+    .filter(Boolean);
+  if (!companyIds.length) return [];
+
+  const allNotes: any[] = [];
+  for (const companyId of companyIds) {
+    const noteAssoc = await hs(
+      "GET",
+      `/crm/v4/objects/companies/${companyId}/associations/notes`
+    ).catch(() => ({ results: [] }));
+    const noteIds: string[] = (noteAssoc.results ?? [])
+      .map((r: any) => String(r.toObjectId ?? ""))
+      .filter(Boolean);
+    const notes = await fetchNotesByIds(noteIds);
+    allNotes.push(...notes);
+  }
+  return allNotes;
+}
+
 export async function getDealNotes(dealId: string): Promise<any[]> {
   // Try CRM v4 associations (toObjectId)
   let assoc = await hs(
@@ -62,19 +96,16 @@ export async function getDealNotes(dealId: string): Promise<any[]> {
   }
 
   if (ids.length) {
-    const batch = await hs("POST", "/crm/v3/objects/notes/batch/read", {
-      inputs: ids.map((id) => ({ id })),
-      properties: ["hs_note_body", "hs_timestamp"],
-    }).catch(() => ({ results: [] }));
-    if ((batch.results ?? []).length) return batch.results;
+    const notes = await fetchNotesByIds(ids);
+    if (notes.length) return notes;
   }
 
-  // Final fallback: legacy engagements API (notes created via older HubSpot UI)
+  // Try legacy engagements API
   const eng = await hs(
     "GET",
     `/engagements/v1/engagements/associated/DEAL/${dealId}/paged?limit=100`
   ).catch(() => ({ results: [] }));
-  return (eng.results ?? [])
+  const engNotes = (eng.results ?? [])
     .filter((e: any) => e.engagement?.type === "NOTE")
     .map((e: any) => ({
       properties: {
@@ -84,6 +115,10 @@ export async function getDealNotes(dealId: string): Promise<any[]> {
         ).toISOString(),
       },
     }));
+  if (engNotes.length) return engNotes;
+
+  // Final fallback: notes on the associated company record
+  return getCompanyNotesForDeal(dealId);
 }
 
 export async function getDealTasks(dealId: string): Promise<any[]> {
