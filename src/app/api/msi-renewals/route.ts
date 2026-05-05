@@ -204,11 +204,14 @@ export async function GET(req: NextRequest) {
       const csaCount: number | null = null;
       const csaRounded: number | null = null;
 
-      const licenseFallback = orderFormLicense ?? currentYearLicense;
-      const renewalCount =
-        csaRounded !== null || licenseFallback !== null
-          ? Math.max(csaRounded ?? 0, licenseFallback ?? 0)
-          : null;
+      // Order form always wins when present (even if smaller than current).
+      // Auto-renew: take max of CSA and current year license.
+      let renewalCount: number | null = null;
+      if (orderFormLicense !== null) {
+        renewalCount = orderFormLicense;
+      } else if (csaRounded !== null || currentYearLicense !== null) {
+        renewalCount = Math.max(csaRounded ?? 0, currentYearLicense ?? 0);
+      }
 
       const renewalDeal = renewalDealMap.get(company.toLowerCase()) ?? null;
       const renewalDealName = `${company} (MSI - Year ${nextMsiYear ?? "?"})`;

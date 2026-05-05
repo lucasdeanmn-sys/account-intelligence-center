@@ -442,9 +442,12 @@ export default function MSITrackerPage() {
         const csaCount = counts[d.company] ??
           Object.entries(counts).find(([k]) => k.toLowerCase().includes(d.company.toLowerCase().slice(0, 6)))?.[1] ?? null;
         const csaRounded = csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
-        const licenseFallback = d.orderFormLicense ?? d.currentYearLicense ?? null;
-        const renewalCount = csaRounded !== null || licenseFallback !== null
-          ? Math.max(csaRounded ?? 0, licenseFallback ?? 0) : null;
+        let renewalCount: number | null = null;
+        if (d.orderFormLicense !== null) {
+          renewalCount = d.orderFormLicense;
+        } else if (csaRounded !== null || d.currentYearLicense !== null) {
+          renewalCount = Math.max(csaRounded ?? 0, d.currentYearLicense ?? 0);
+        }
         return { ...d, csaCount, csaRounded, renewalCount };
       }));
     } catch (e: any) {
