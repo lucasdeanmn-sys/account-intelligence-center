@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
   const v3Ids: string[] = ((v3Assoc.data?.results ?? []) as any[])
     .map((r: any) => String(r.id ?? r.toObjectId ?? ""))
     .filter(Boolean);
-  const allIds = [...new Set([...v4Ids, ...v3Ids])];
+  const allIds = Array.from(new Set([...v4Ids, ...v3Ids]));
 
   let batchRead: any = null;
   if (allIds.length) {
