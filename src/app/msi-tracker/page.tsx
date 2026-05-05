@@ -89,7 +89,7 @@ function ConfirmModal({ entry, onCancel, onConfirm }: ConfirmModalProps) {
             <div className="flex gap-4 mt-2">
               {entry.cssaRounded !== null && (
                 <p className="text-xs" style={{ color: "#64748b" }}>
-                  CSSA: {entry.cssaCount?.toLocaleString() ?? "—"} → rounded: {entry.cssaRounded.toLocaleString()}
+                  CSA: {entry.cssaCount?.toLocaleString() ?? "—"} → rounded: {entry.cssaRounded.toLocaleString()}
                 </p>
               )}
               {entry.orderFormLicense !== null && (
@@ -243,7 +243,14 @@ function DealRow({ entry, onProcess }: DealRowProps) {
       <div className="flex items-center gap-4 p-4">
         {/* Company */}
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-white truncate">{entry.company}</p>
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-semibold text-white truncate">{entry.company}</p>
+            {entry.orderFormLicense === null && entry.cssaCount === null && (
+              <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f59e0b15", color: "#f59e0b" }}>
+                No M1 data
+              </span>
+            )}
+          </div>
           <p className="text-xs mt-0.5 truncate" style={{ color: "#64748b" }}>
             {entry.currentDealName}
             {entry.msiYear && ` · Year ${entry.msiYear} → ${entry.nextMsiYear ?? "?"}`}
@@ -253,25 +260,21 @@ function DealRow({ entry, onProcess }: DealRowProps) {
         {/* Data columns */}
         <div className="hidden sm:flex items-center gap-6">
           <div className="text-right w-20">
-            <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>Order Form</p>
             <p className="text-sm font-medium text-white">
               {entry.orderFormLicense?.toLocaleString() ?? "—"}
             </p>
           </div>
           <div className="text-right w-20">
-            <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>CSSA</p>
             <p className="text-sm font-medium text-white">
               {entry.cssaCount !== null ? entry.cssaCount.toLocaleString() : "—"}
             </p>
           </div>
           <div className="text-right w-24">
-            <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>Rounded</p>
             <p className="text-sm font-medium text-white">
               {entry.cssaRounded?.toLocaleString() ?? "—"}
             </p>
           </div>
           <div className="text-right w-28">
-            <p className="text-xs mb-0.5" style={{ color: "#64748b" }}>Renewal Count</p>
             <p className="text-sm font-bold" style={{ color: renewalHigher ? "#f59e0b" : "#a5b4fc" }}>
               {entry.renewalCount !== null
                 ? `${entry.renewalCount.toLocaleString()}${renewalHigher && entry.orderFormLicense ? ` (${entry.orderFormLicense.toLocaleString()})` : ""}`
@@ -312,7 +315,7 @@ function DealRow({ entry, onProcess }: DealRowProps) {
       {/* Mobile data */}
       <div className="flex sm:hidden gap-4 px-4 pb-3 text-sm">
         <span style={{ color: "#64748b" }}>OF: <span className="text-white">{entry.orderFormLicense?.toLocaleString() ?? "—"}</span></span>
-        <span style={{ color: "#64748b" }}>CSSA: <span className="text-white">{entry.cssaCount?.toLocaleString() ?? "—"}</span></span>
+        <span style={{ color: "#64748b" }}>CSA: <span className="text-white">{entry.cssaCount?.toLocaleString() ?? "—"}</span></span>
         <span style={{ color: "#64748b" }}>Renewal: <span style={{ color: "#a5b4fc", fontWeight: 600 }}>{entry.renewalCount?.toLocaleString() ?? "—"}</span></span>
       </div>
 
@@ -502,7 +505,7 @@ export default function MSITrackerPage() {
           <div className="flex-1" />
           <div className="flex items-center gap-6">
             <p className="text-xs w-20 text-right" style={{ color: "#475569" }}>Order Form</p>
-            <p className="text-xs w-20 text-right" style={{ color: "#475569" }}>CSSA</p>
+            <p className="text-xs w-20 text-right" style={{ color: "#475569" }}>CSA</p>
             <p className="text-xs w-24 text-right" style={{ color: "#475569" }}>Rounded</p>
             <p className="text-xs w-28 text-right" style={{ color: "#475569" }}>Renewal Count</p>
           </div>
