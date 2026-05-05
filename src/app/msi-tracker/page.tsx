@@ -354,6 +354,7 @@ export default function MSITrackerPage() {
   const [confirmEntry, setConfirmEntry] = useState<RenewalEntry | null>(null);
   const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[] } | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
+  const [csaLoading, setCsaLoading] = useState(false);
 
   async function runReport() {
     if (!month || !year) return;
@@ -408,6 +409,37 @@ export default function MSITrackerPage() {
       )
     );
     setConfirmEntry(null);
+  }
+
+  async function fetchCsa() {
+    if (!deals.length) return;
+    setCsaLoading(true);
+    setError(null);
+    try {
+      const companies = deals.map((d) => d.company);
+      const res = await fetch("/api/msi-renewals/csa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companies }),
+      });
+      const text = await res.text();
+      let data: any;
+      try { data = JSON.parse(text); } catch { throw new Error(`CSA error: ${text.slice(0, 200)}`); }
+      if (!res.ok) throw new Error(data.error || "CSA lookup failed");
+      const counts: Record<string, number | null> = data.counts ?? {};
+      setDeals((prev) => prev.map((d) => {
+        const csaCount = counts[d.company] ??
+          Object.entries(counts).find(([k]) => k.toLowerCase().includes(d.company.toLowerCase().slice(0, 6)))?.[1] ?? null;
+        const csaRounded = csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
+        const renewalCount = csaRounded !== null || d.orderFormLicense !== null
+          ? Math.max(csaRounded ?? 0, d.orderFormLicense ?? 0) : null;
+        return { ...d, csaCount, csaRounded, renewalCount };
+      }));
+    } catch (e: any) {
+      setError(e.message || "Failed to fetch CSA counts");
+    } finally {
+      setCsaLoading(false);
+    }
   }
 
   async function generateEmail() {
@@ -518,15 +550,26 @@ export default function MSITrackerPage() {
               </span>
             )}
           </div>
-          <button
-            onClick={generateEmail}
-            disabled={emailLoading || deals.length === 0}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
-            style={{ borderColor: "#252836", color: "#94a3b8" }}
-          >
-            {emailLoading ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />}
-            Generate Email
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={fetchCsa}
+              disabled={csaLoading || deals.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
+              style={{ borderColor: "#252836", color: "#94a3b8" }}
+            >
+              {csaLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+              {csaLoading ? "Fetching CSA…" : "Fetch CSA"}
+            </button>
+            <button
+              onClick={generateEmail}
+              disabled={emailLoading || deals.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
+              style={{ borderColor: "#252836", color: "#94a3b8" }}
+            >
+              {emailLoading ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />}
+              Generate Email
+            </button>
+          </div>
         </div>
       )}
 

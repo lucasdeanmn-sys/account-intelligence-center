@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callClaude, runAgentLoop, csaServer, configured, extractJSON } from "@/lib/anthropic";
+import { callClaude, extractJSON } from "@/lib/anthropic";
 import { getMsiDealsByStartDate, getDealNotes } from "@/lib/hubspot";
 import type { RenewalEntry } from "@/lib/types";
 
@@ -50,9 +50,6 @@ For each deal, extract:
 Return ONLY valid JSON array:
 [{"dealId":"...","msiYear":4,"nextMsiYear":5,"orderFormLicense":2000,"m1NoteHtml":"..."}]`;
 
-const CSA_SYSTEM = `You have access to CSA tools. For each company name provided, query CSA to get the current circuit/subscriber count.
-Return ONLY valid JSON mapping company names to counts (use null if not found):
-{"Company Name": 12345, "Another Co": null}`;
 
 async function fetchNotesBatched(deals: any[]): Promise<{ dealId: string; notes: any[] }[]> {
   const results: { dealId: string; notes: any[] }[] = [];
@@ -165,25 +162,7 @@ export async function GET(req: NextRequest) {
 
     const parsedMap = new Map(parsedNotes.map((p: any) => [p.dealId, p]));
 
-    // 4. Query CSA for circuit counts (optional — graceful fallback)
-    const companies = filtered.map((d: any) => extractCompany(d.properties?.dealname ?? ""));
-    let csaMap: Record<string, number | null> = {};
-    const csaServers = configured(csaServer());
-    if (csaServers.length > 0) {
-      try {
-        const csaResult = await runAgentLoop(
-          CSA_SYSTEM,
-          `Get current circuit counts for these companies:\n${JSON.stringify(companies)}`,
-          csaServers,
-          4096
-        );
-        csaMap = extractJSON<Record<string, number | null>>(csaResult);
-      } catch {
-        // CSA unavailable — proceed with nulls
-      }
-    }
-
-    // 5. Build enriched entries
+    // 4. Build enriched entries (CSA counts fetched separately via /api/msi-renewals/csa)
     const entries: RenewalEntry[] = filtered.map((deal: any) => {
       const company = extractCompany(deal.properties?.dealname ?? "");
       const parsed = parsedMap.get(deal.id) ?? {};
@@ -191,17 +170,8 @@ export async function GET(req: NextRequest) {
       const nextMsiYear = msiYear ? msiYear + 1 : null;
       const orderFormLicense: number | null = parsed.orderFormLicense ?? null;
 
-      // CSA: fuzzy match by company name
-      const csaCount: number | null =
-        csaMap[company] ??
-        Object.entries(csaMap).find(([k]) =>
-          k.toLowerCase().includes(company.toLowerCase().slice(0, 6))
-        )?.[1] ?? null;
-
-      const csaRounded =
-        csaCount !== null
-          ? Math.max(1000, Math.ceil(csaCount / 50) * 50)
-          : null;
+      const csaCount: number | null = null;
+      const csaRounded: number | null = null;
 
       const renewalCount =
         csaRounded !== null || orderFormLicense !== null
