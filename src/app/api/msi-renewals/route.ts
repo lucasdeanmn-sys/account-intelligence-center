@@ -130,7 +130,7 @@ function parseM1Note(
   // For extension deals, infer the current year from the highest year in all entries
   let effectiveMsiYear = msiYear;
   if (effectiveMsiYear === null) {
-    const allYears = [...italicEntries.keys(), ...nonItalicEntries.keys()];
+    const allYears = Array.from(italicEntries.keys()).concat(Array.from(nonItalicEntries.keys()));
     if (allYears.length) effectiveMsiYear = Math.max(...allYears);
   }
   const effectiveNextYear = effectiveMsiYear ? effectiveMsiYear + 1 : null;
