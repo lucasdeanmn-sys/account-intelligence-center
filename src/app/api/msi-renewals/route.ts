@@ -51,16 +51,17 @@ function parseM1Note(
   const msiYear = extractYearFromName(dealName);
   const nextMsiYear = msiYear ? msiYear + 1 : null;
 
-  // Collect all M1 Order Form notes
-  const m1Notes = notes.filter((n) =>
-    n.body.toLowerCase().includes("m1 order form")
-  );
+  // Collect all M1/MSI Order Form notes (some notes say "MSI Order Form" instead of "M1 Order Form")
+  const m1Notes = notes.filter((n) => {
+    const lower = n.body.toLowerCase();
+    return lower.includes("m1 order form") || lower.includes("msi order form");
+  });
   if (!m1Notes.length) {
     return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null };
   }
 
   // Pick the note that mentions the current or next year; fall back to most recent
-  const yearRe = (yr: number) => new RegExp(`MSI\\s+Year\\s+${yr}\\b`, "i");
+  const yearRe = (yr: number) => new RegExp(`(?:MSI\\s+)?Year\\s+${yr}\\b`, "i");
   const m1Note =
     (msiYear !== null
       ? m1Notes.find((n) => yearRe(nextMsiYear ?? -1).test(n.body) || yearRe(msiYear).test(n.body))
@@ -69,13 +70,16 @@ function parseM1Note(
   const html = m1Note.body;
   const m1NoteId = m1Note.id ?? null;
 
+  // Year entry pattern: "MSI Year N - X,XXX" or "Year N - X,XXX" (some notes omit "MSI")
+  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*([\d,]+)/i;
+
   // Collect italic (already-invoiced) entries
   const italicEntries = new Map<number, number>();
   const italicRe = /<(?:em|i)[^>]*>([\s\S]*?)<\/(?:em|i)>/gi;
   let m: RegExpExecArray | null;
   while ((m = italicRe.exec(html)) !== null) {
     const inner = m[1];
-    const hit = inner.match(/MSI\s+Year\s+(\d+)\s*[-–—]\s*([\d,]+)/i);
+    const hit = inner.match(yearEntryRe);
     if (hit) {
       const yr = parseInt(hit[1], 10);
       const cnt = parseCount(hit[2]);
@@ -86,7 +90,7 @@ function parseM1Note(
   // Collect non-italic (upcoming) entries
   const withoutItalics = html.replace(/<(?:em|i)[^>]*>[\s\S]*?<\/(?:em|i)>/gi, "");
   const nonItalicEntries = new Map<number, { main: number; paren: number | null }>();
-  const niRe = /MSI\s+Year\s+(\d+)\s*[-–—]\s*([\d,]+)(?:\s*\(([^)]*)\))?/gi;
+  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*([\d,]+)(?:\s*\(([^)]*)\))?/gi;
   while ((m = niRe.exec(withoutItalics)) !== null) {
     const yr = parseInt(m[1], 10);
     const main = parseCount(m[2]);
@@ -103,10 +107,16 @@ function parseM1Note(
     orderFormLicense = e.paren ?? e.main;
   }
 
-  // currentYearLicense: italic entry for the CURRENT year (auto-renew fallback)
+  // currentYearLicense: current year count for auto-renew baseline.
+  // Prefer italic entry (already-invoiced); fall back to non-italic if not yet billed.
+  // Use the main (full-year) count, not the paren (partial-term invoiced amount).
   let currentYearLicense: number | null = null;
-  if (msiYear !== null && italicEntries.has(msiYear)) {
-    currentYearLicense = italicEntries.get(msiYear)!;
+  if (msiYear !== null) {
+    if (italicEntries.has(msiYear)) {
+      currentYearLicense = italicEntries.get(msiYear)!;
+    } else if (nonItalicEntries.has(msiYear)) {
+      currentYearLicense = nonItalicEntries.get(msiYear)!.main;
+    }
   }
 
   return { dealId, msiYear, nextMsiYear, orderFormLicense, currentYearLicense, m1NoteHtml: html, m1NoteId };
