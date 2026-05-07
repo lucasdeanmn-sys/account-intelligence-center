@@ -51,12 +51,20 @@ function parseM1Note(
   const msiYear = extractYearFromName(dealName);
   const nextMsiYear = msiYear ? msiYear + 1 : null;
 
-  const m1Note = notes.find((n) =>
+  // Collect all M1 Order Form notes
+  const m1Notes = notes.filter((n) =>
     n.body.toLowerCase().includes("m1 order form")
   );
-  if (!m1Note) {
+  if (!m1Notes.length) {
     return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null };
   }
+
+  // Pick the note that mentions the current or next year; fall back to most recent
+  const yearRe = (yr: number) => new RegExp(`MSI\\s+Year\\s+${yr}\\b`, "i");
+  const m1Note =
+    (msiYear !== null
+      ? m1Notes.find((n) => yearRe(nextMsiYear ?? -1).test(n.body) || yearRe(msiYear).test(n.body))
+      : null) ?? m1Notes[0];
 
   const html = m1Note.body;
   const m1NoteId = m1Note.id ?? null;
