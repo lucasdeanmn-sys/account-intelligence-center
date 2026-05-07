@@ -10,14 +10,17 @@ interface CsaRecord {
 }
 
 function matchCompany(company: string, records: CsaRecord[]): number | null {
+  if (!company) return null;
   const needle = company.toLowerCase().trim();
+  // Only consider records that have a valid instance string
+  const valid = records.filter((r) => typeof r.instance === "string" && r.instance.length > 0);
 
   // Exact match
-  let hit = records.find((r) => r.instance.toLowerCase().trim() === needle);
+  let hit = valid.find((r) => r.instance.toLowerCase().trim() === needle);
   if (hit) return hit.current_circuits ?? null;
 
   // One contains the other
-  hit = records.find(
+  hit = valid.find(
     (r) =>
       r.instance.toLowerCase().includes(needle) ||
       needle.includes(r.instance.toLowerCase())
@@ -25,7 +28,7 @@ function matchCompany(company: string, records: CsaRecord[]): number | null {
   if (hit) return hit.current_circuits ?? null;
 
   // First 6 chars
-  hit = records.find((r) =>
+  hit = valid.find((r) =>
     r.instance.toLowerCase().startsWith(needle.slice(0, 6))
   );
   return hit?.current_circuits ?? null;
