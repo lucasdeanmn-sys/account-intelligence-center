@@ -115,16 +115,17 @@ function parseM1Note(
     }
   }
 
-  // Collect non-italic (upcoming) entries
+  // Collect non-italic (upcoming) entries.
+  // Handles both "Year N - 1,000 (opt_paren)" and paren-only "Year N - (1,000)".
   const withoutItalics = html.replace(/<(?:em|i)[^>]*>[\s\S]*?<\/(?:em|i)>/gi, "");
-  const nonItalicEntries = new Map<number, { main: number; paren: number | null }>();
-  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*([\d,]+)(?:\s*\(([^)]*)\))?/gi;
+  const nonItalicEntries = new Map<number, { main: number | null; paren: number | null }>();
+  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*(?:([\d,]+)(?:\s*\(([^)]*)\))?|\(([^)]*)\))/gi;
   while ((m = niRe.exec(withoutItalics)) !== null) {
     const yr = parseInt(m[1], 10);
-    const main = parseCount(m[2]);
-    const parenStr = m[3]?.trim() ?? null;
+    const main = m[2] ? parseCount(m[2]) : null;                   // normal "N - count" form
+    const parenStr = (m[3] ?? m[4])?.trim() ?? null;               // paren from either form
     const paren = parenStr ? parseCount(parenStr) : null;
-    if (main !== null) nonItalicEntries.set(yr, { main, paren });
+    if (main !== null || paren !== null) nonItalicEntries.set(yr, { main, paren });
   }
 
   // For extension deals, infer the current year from the highest year in all entries
@@ -135,8 +136,8 @@ function parseM1Note(
   }
   const effectiveNextYear = effectiveMsiYear ? effectiveMsiYear + 1 : null;
 
-  // orderFormLicense: non-italic entry for the NEXT year
-  // If parens contain a number it's the order-form count; otherwise use main count
+  // orderFormLicense: non-italic entry for the NEXT year.
+  // Prefer paren (new order-form qty); fall back to main; support paren-only entries.
   let orderFormLicense: number | null = null;
   if (effectiveNextYear !== null && nonItalicEntries.has(effectiveNextYear)) {
     const e = nonItalicEntries.get(effectiveNextYear)!;
@@ -145,13 +146,14 @@ function parseM1Note(
 
   // currentYearLicense: current year count for auto-renew baseline.
   // Prefer italic entry (already-invoiced); fall back to non-italic if not yet billed.
-  // Use the main (full-year) count, not the paren (partial-term invoiced amount).
+  // For non-italic: prefer main (full-year count) over paren (partial-term amount).
   let currentYearLicense: number | null = null;
   if (effectiveMsiYear !== null) {
     if (italicEntries.has(effectiveMsiYear)) {
       currentYearLicense = italicEntries.get(effectiveMsiYear)!;
     } else if (nonItalicEntries.has(effectiveMsiYear)) {
-      currentYearLicense = nonItalicEntries.get(effectiveMsiYear)!.main;
+      const e = nonItalicEntries.get(effectiveMsiYear)!;
+      currentYearLicense = e.main ?? e.paren;
     }
   }
 
