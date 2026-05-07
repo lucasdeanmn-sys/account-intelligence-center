@@ -75,37 +75,52 @@ async function getCompanyNotesForDeal(dealId: string): Promise<any[]> {
 }
 
 export async function getDealNotes(dealId: string): Promise<any[]> {
-  // Try CRM v4 associations (toObjectId)
-  let assoc = await hs(
-    "GET",
-    `/crm/v4/objects/deals/${dealId}/associations/notes`
-  ).catch(() => ({ results: [] }));
-  let ids: string[] = (assoc.results ?? [])
+  // Fetch direct note associations and company-level notes in parallel.
+  // Company notes are always included so we never miss order form notes that
+  // live at the company level rather than directly on the deal (e.g. extension
+  // deals that have an amendment note on the deal but the main order form on
+  // the shared company record).
+  const [v4Assoc, companyNotes] = await Promise.all([
+    hs("GET", `/crm/v4/objects/deals/${dealId}/associations/notes`).catch(() => ({ results: [] })),
+    getCompanyNotesForDeal(dealId),
+  ]);
+
+  let directIds: string[] = (v4Assoc.results ?? [])
     .map((r: any) => String(r.toObjectId))
     .filter((id: string) => id && id !== "undefined");
 
-  // Fall back to CRM v3 associations (id)
-  if (!ids.length) {
-    assoc = await hs(
+  // Fall back to CRM v3 associations (id) if v4 returned nothing
+  if (!directIds.length) {
+    const v3Assoc = await hs(
       "GET",
       `/crm/v3/objects/deals/${dealId}/associations/notes`
     ).catch(() => ({ results: [] }));
-    ids = (assoc.results ?? [])
+    directIds = (v3Assoc.results ?? [])
       .map((r: any) => String(r.id))
       .filter((id: string) => Boolean(id));
   }
 
-  if (ids.length) {
-    const notes = await fetchNotesByIds(ids);
-    if (notes.length) return notes;
-  }
+  // Fetch directly-associated notes
+  const directNotes = directIds.length ? await fetchNotesByIds(directIds) : [];
 
-  // Try legacy engagements API
+  // Merge direct + company notes, deduplicating by ID
+  const seen = new Set<string>();
+  const merged: any[] = [];
+  for (const note of [...directNotes, ...companyNotes]) {
+    const id = String(note.id ?? "");
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      merged.push(note);
+    }
+  }
+  if (merged.length) return merged;
+
+  // Try legacy engagements API as a last resort
   const eng = await hs(
     "GET",
     `/engagements/v1/engagements/associated/DEAL/${dealId}/paged?limit=100`
   ).catch(() => ({ results: [] }));
-  const engNotes = (eng.results ?? [])
+  return (eng.results ?? [])
     .filter((e: any) => e.engagement?.type === "NOTE")
     .map((e: any) => ({
       id: String(e.engagement?.id ?? ""),
@@ -116,10 +131,6 @@ export async function getDealNotes(dealId: string): Promise<any[]> {
         ).toISOString(),
       },
     }));
-  if (engNotes.length) return engNotes;
-
-  // Final fallback: notes on the associated company record
-  return getCompanyNotesForDeal(dealId);
 }
 
 export async function getDealTasks(dealId: string): Promise<any[]> {
