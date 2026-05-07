@@ -320,7 +320,7 @@ function DealRow({ entry, onProcess }: DealRowProps) {
         <div className="hidden sm:flex items-center gap-6">
           <div className="text-right w-20">
             <p className="text-sm font-medium text-white">
-              {entry.orderFormLicense?.toLocaleString() ?? "—"}
+              {(entry.orderFormLicense ?? entry.currentYearLicense)?.toLocaleString() ?? "—"}
             </p>
           </div>
           <div className="text-right w-20">
@@ -373,7 +373,7 @@ function DealRow({ entry, onProcess }: DealRowProps) {
 
       {/* Mobile data */}
       <div className="flex sm:hidden gap-4 px-4 pb-3 text-sm">
-        <span style={{ color: "#64748b" }}>OF: <span className="text-white">{entry.orderFormLicense?.toLocaleString() ?? "—"}</span></span>
+        <span style={{ color: "#64748b" }}>OF: <span className="text-white">{(entry.orderFormLicense ?? entry.currentYearLicense)?.toLocaleString() ?? "—"}</span></span>
         <span style={{ color: "#64748b" }}>CSA: <span className="text-white">{entry.csaCount?.toLocaleString() ?? "—"}</span></span>
         <span style={{ color: "#64748b" }}>Renewal: <span style={{ color: "#a5b4fc", fontWeight: 600 }}>{entry.renewalCount?.toLocaleString() ?? "—"}</span></span>
       </div>
