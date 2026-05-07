@@ -113,6 +113,7 @@ export interface RenewalEntry {
   renewalStartDate: string;
   expirationDate: string;
   m1NoteHtml: string | null;
+  m1NoteId: string | null;
   processed?: boolean;
 }
 

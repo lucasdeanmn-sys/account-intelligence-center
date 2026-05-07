@@ -108,6 +108,7 @@ export async function getDealNotes(dealId: string): Promise<any[]> {
   const engNotes = (eng.results ?? [])
     .filter((e: any) => e.engagement?.type === "NOTE")
     .map((e: any) => ({
+      id: String(e.engagement?.id ?? ""),
       properties: {
         hs_note_body: e.metadata?.body ?? e.metadata?.bodyHtml ?? "",
         hs_timestamp: new Date(
@@ -331,6 +332,12 @@ export async function getDealLineItems(dealId: string): Promise<any[]> {
     properties: ["name", "quantity", "price", "amount", "hs_product_id"],
   }).catch(() => ({ results: [] }));
   return batch.results ?? [];
+}
+
+export async function updateNoteBody(noteId: string, htmlBody: string) {
+  return hs("PATCH", `/crm/v3/objects/notes/${noteId}`, {
+    properties: { hs_note_body: htmlBody },
+  });
 }
 
 export async function updateLineItem(lineItemId: string, quantity: number) {

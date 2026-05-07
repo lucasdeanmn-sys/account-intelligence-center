@@ -40,12 +40,13 @@ interface M1Parsed {
   orderFormLicense: number | null;
   currentYearLicense: number | null;
   m1NoteHtml: string | null;
+  m1NoteId: string | null;
 }
 
 function parseM1Note(
   dealId: string,
   dealName: string,
-  notes: { body: string }[]
+  notes: { id?: string; body: string }[]
 ): M1Parsed {
   const msiYear = extractYearFromName(dealName);
   const nextMsiYear = msiYear ? msiYear + 1 : null;
@@ -54,10 +55,11 @@ function parseM1Note(
     n.body.toLowerCase().includes("m1 order form")
   );
   if (!m1Note) {
-    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null };
+    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null };
   }
 
   const html = m1Note.body;
+  const m1NoteId = m1Note.id ?? null;
 
   // Collect italic (already-invoiced) entries
   const italicEntries = new Map<number, number>();
@@ -99,7 +101,7 @@ function parseM1Note(
     currentYearLicense = italicEntries.get(msiYear)!;
   }
 
-  return { dealId, msiYear, nextMsiYear, orderFormLicense, currentYearLicense, m1NoteHtml: html };
+  return { dealId, msiYear, nextMsiYear, orderFormLicense, currentYearLicense, m1NoteHtml: html, m1NoteId };
 }
 
 async function fetchNotesBatched(deals: any[]): Promise<{ dealId: string; notes: any[] }[]> {
@@ -179,6 +181,7 @@ export async function GET(req: NextRequest) {
     for (const deal of filtered) {
       const rawNotes = notesAndItems.find((n) => n.dealId === deal.id)?.notes ?? [];
       const notes = rawNotes.map((n: any) => ({
+        id: n.id ?? "",
         body: n.properties?.hs_note_body ?? "",
       }));
       const parsed = parseM1Note(deal.id, deal.properties?.dealname ?? "", notes);
@@ -195,6 +198,7 @@ export async function GET(req: NextRequest) {
         orderFormLicense: null,
         currentYearLicense: null,
         m1NoteHtml: null,
+        m1NoteId: null,
       };
       const msiYear = parsed.msiYear ?? extractYearFromName(deal.properties?.dealname ?? "");
       const nextMsiYear = msiYear ? msiYear + 1 : null;
@@ -236,6 +240,7 @@ export async function GET(req: NextRequest) {
         renewalStartDate,
         expirationDate,
         m1NoteHtml: parsed.m1NoteHtml ?? null,
+        m1NoteId: parsed.m1NoteId ?? null,
       };
     });
 

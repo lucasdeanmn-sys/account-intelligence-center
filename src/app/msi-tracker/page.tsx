@@ -168,16 +168,43 @@ interface EmailModalProps {
   subject: string;
   body: string;
   to: string[];
+  deals: RenewalEntry[];
   onClose: () => void;
 }
 
-function EmailModal({ subject, body, to, onClose }: EmailModalProps) {
+function EmailModal({ subject, body, to, deals, onClose }: EmailModalProps) {
   const [copied, setCopied] = useState(false);
+  const [italicizing, setItalicizing] = useState(false);
+  const [italicizeResult, setItalicizeResult] = useState<{ updated: number; skipped: number; errors: number } | null>(null);
 
   function copy() {
     navigator.clipboard.writeText(body);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function updateM1Notes() {
+    setItalicizing(true);
+    setItalicizeResult(null);
+    try {
+      const res = await fetch("/api/msi-renewals/italicize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deals }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      const results: { status: string }[] = data.results ?? [];
+      setItalicizeResult({
+        updated: results.filter((r) => r.status === "updated").length,
+        skipped: results.filter((r) => r.status === "skipped").length,
+        errors: results.filter((r) => r.status === "error").length,
+      });
+    } catch (e: any) {
+      setItalicizeResult({ updated: 0, skipped: 0, errors: 1 });
+    } finally {
+      setItalicizing(false);
+    }
   }
 
   const mailto = `mailto:${to.join(",")}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
@@ -200,13 +227,37 @@ function EmailModal({ subject, body, to, onClose }: EmailModalProps) {
           <p className="text-xs mb-1" style={{ color: "#64748b" }}>Body</p>
           <pre className="text-sm whitespace-pre-wrap leading-relaxed" style={{ color: "#94a3b8" }}>{body}</pre>
         </div>
+
+        {/* Italicize result banner */}
+        {italicizeResult && (
+          <div className="mx-5 mb-2 px-4 py-2.5 rounded-lg text-xs flex items-center gap-2"
+            style={{
+              backgroundColor: italicizeResult.errors > 0 ? "#ef444415" : "#22c55e15",
+              color: italicizeResult.errors > 0 ? "#ef4444" : "#22c55e",
+            }}>
+            <CheckCircle size={13} />
+            {italicizeResult.errors > 0
+              ? `${italicizeResult.errors} error(s) — ${italicizeResult.updated} updated, ${italicizeResult.skipped} skipped`
+              : `M1 notes updated: ${italicizeResult.updated} italicized, ${italicizeResult.skipped} skipped`}
+          </div>
+        )}
+
         <div className="flex gap-3 p-5 border-t shrink-0" style={{ borderColor: "#252836" }}>
           <button
             onClick={copy}
-            className="flex-1 py-2 rounded-lg text-sm font-medium border transition-colors"
+            className="py-2 px-4 rounded-lg text-sm font-medium border transition-colors"
             style={{ borderColor: "#252836", color: "#94a3b8" }}
           >
             {copied ? "Copied!" : "Copy Body"}
+          </button>
+          <button
+            onClick={updateM1Notes}
+            disabled={italicizing || italicizeResult?.updated !== undefined && italicizeResult.errors === 0}
+            className="py-2 px-4 rounded-lg text-sm font-medium border transition-colors disabled:opacity-50 flex items-center gap-2"
+            style={{ borderColor: "#252836", color: "#94a3b8" }}
+          >
+            {italicizing ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle size={13} />}
+            {italicizing ? "Updating…" : "Update M1 Notes"}
           </button>
           <a
             href={mailto}
@@ -639,6 +690,7 @@ export default function MSITrackerPage() {
           subject={emailModal.subject}
           body={emailModal.body}
           to={emailModal.to}
+          deals={deals}
           onClose={() => setEmailModal(null)}
         />
       )}
