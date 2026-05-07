@@ -51,21 +51,49 @@ function parseM1Note(
   const msiYear = extractYearFromName(dealName);
   const nextMsiYear = msiYear ? msiYear + 1 : null;
 
-  // Collect all M1/MSI Order Form notes (some notes say "MSI Order Form" instead of "M1 Order Form")
+  // Helper: extract max year number mentioned in a note body
+  function maxYearInNote(body: string): number {
+    const re = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*[\d,]+/gi;
+    let max = 0;
+    let hit: RegExpExecArray | null;
+    while ((hit = re.exec(body)) !== null) max = Math.max(max, parseInt(hit[1], 10));
+    return max;
+  }
+
+  // Collect all order/amendment notes. Accept:
+  //   "M1 Order Form", "MSI Order Form" (standard labels)
+  //   "M1 Amend" / "M1 Amendment" / "M1 Amendement" (amendment notes for extensions)
   const m1Notes = notes.filter((n) => {
     const lower = n.body.toLowerCase();
-    return lower.includes("m1 order form") || lower.includes("msi order form");
+    return (
+      lower.includes("m1 order form") ||
+      lower.includes("msi order form") ||
+      lower.includes("m1 amend")       // catches "M1 Amendment" and "M1 Amendement"
+    );
   });
   if (!m1Notes.length) {
     return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null };
   }
 
-  // Pick the note that mentions the current or next year; fall back to most recent
+  // Pick the best note:
+  //  - Regular deal (msiYear known): prefer the note that mentions current or next year
+  //  - Extension deal (msiYear null): pick the note with the highest max year (most recent term)
   const yearRe = (yr: number) => new RegExp(`(?:MSI\\s+)?Year\\s+${yr}\\b`, "i");
-  const m1Note =
-    (msiYear !== null
-      ? m1Notes.find((n) => yearRe(nextMsiYear ?? -1).test(n.body) || yearRe(msiYear).test(n.body))
-      : null) ?? m1Notes[0];
+  let m1Note: typeof m1Notes[0];
+  if (msiYear !== null) {
+    m1Note =
+      m1Notes.find((n) => yearRe(nextMsiYear ?? -1).test(n.body) || yearRe(msiYear).test(n.body)) ??
+      m1Notes[0];
+  } else {
+    // Extension: use the note that covers the most recent year.
+    // Tiebreak by note ID (larger = more recently created) to prefer the newest order form.
+    m1Note = m1Notes.reduce((best, n) => {
+      const nMax = maxYearInNote(n.body);
+      const bMax = maxYearInNote(best.body);
+      if (nMax !== bMax) return nMax > bMax ? n : best;
+      return parseInt(n.id ?? "0", 10) > parseInt(best.id ?? "0", 10) ? n : best;
+    });
+  }
 
   const html = m1Note.body;
   const m1NoteId = m1Note.id ?? null;
@@ -99,11 +127,19 @@ function parseM1Note(
     if (main !== null) nonItalicEntries.set(yr, { main, paren });
   }
 
+  // For extension deals, infer the current year from the highest year in all entries
+  let effectiveMsiYear = msiYear;
+  if (effectiveMsiYear === null) {
+    const allYears = [...italicEntries.keys(), ...nonItalicEntries.keys()];
+    if (allYears.length) effectiveMsiYear = Math.max(...allYears);
+  }
+  const effectiveNextYear = effectiveMsiYear ? effectiveMsiYear + 1 : null;
+
   // orderFormLicense: non-italic entry for the NEXT year
   // If parens contain a number it's the order-form count; otherwise use main count
   let orderFormLicense: number | null = null;
-  if (nextMsiYear !== null && nonItalicEntries.has(nextMsiYear)) {
-    const e = nonItalicEntries.get(nextMsiYear)!;
+  if (effectiveNextYear !== null && nonItalicEntries.has(effectiveNextYear)) {
+    const e = nonItalicEntries.get(effectiveNextYear)!;
     orderFormLicense = e.paren ?? e.main;
   }
 
@@ -111,15 +147,24 @@ function parseM1Note(
   // Prefer italic entry (already-invoiced); fall back to non-italic if not yet billed.
   // Use the main (full-year) count, not the paren (partial-term invoiced amount).
   let currentYearLicense: number | null = null;
-  if (msiYear !== null) {
-    if (italicEntries.has(msiYear)) {
-      currentYearLicense = italicEntries.get(msiYear)!;
-    } else if (nonItalicEntries.has(msiYear)) {
-      currentYearLicense = nonItalicEntries.get(msiYear)!.main;
+  if (effectiveMsiYear !== null) {
+    if (italicEntries.has(effectiveMsiYear)) {
+      currentYearLicense = italicEntries.get(effectiveMsiYear)!;
+    } else if (nonItalicEntries.has(effectiveMsiYear)) {
+      currentYearLicense = nonItalicEntries.get(effectiveMsiYear)!.main;
     }
   }
 
-  return { dealId, msiYear, nextMsiYear, orderFormLicense, currentYearLicense, m1NoteHtml: html, m1NoteId };
+  // Return effective year values so extensions show year context in the UI
+  return {
+    dealId,
+    msiYear: effectiveMsiYear,
+    nextMsiYear: effectiveNextYear,
+    orderFormLicense,
+    currentYearLicense,
+    m1NoteHtml: html,
+    m1NoteId,
+  };
 }
 
 async function fetchNotesBatched(deals: any[]): Promise<{ dealId: string; notes: any[] }[]> {
