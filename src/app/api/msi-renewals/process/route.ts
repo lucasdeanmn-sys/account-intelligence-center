@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
 
       // Associate the new deal with the same company as the current deal
       if (currentCompanyId) {
-        await associateDealWithCompany(renewalDealId, currentCompanyId).catch((e) => {
+        await associateDealWithCompany(renewalDealId!, currentCompanyId).catch((e) => {
           console.warn("Company association failed (non-fatal):", e.message);
         });
       }
