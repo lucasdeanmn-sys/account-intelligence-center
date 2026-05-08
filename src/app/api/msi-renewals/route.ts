@@ -194,7 +194,10 @@ function parseM1Note(
 
   // Collect all year numbers found in the note (used for sheetNote generation)
   const allYearsInNote = Array.from(
-    new Set([...italicEntries.keys(), ...nonItalicEntries.keys()])
+    new Set([
+      ...Array.from(italicEntries.keys()),
+      ...Array.from(nonItalicEntries.keys()),
+    ])
   ).sort((a, b) => a - b);
 
   // Return effective year values so extensions show year context in the UI
