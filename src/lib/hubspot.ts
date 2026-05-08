@@ -650,13 +650,24 @@ export async function getExtensionDealForCompany(
 // For auto-renew deals: write an italic "MSI Year N - X,XXX" entry into the M1 note.
 // • If the year already appears italic  → no-op.
 // • If it appears non-italic            → wrap the existing line in <em>.
-// • If it's absent                      → append a new italic <p> at the end.
+// • If it's absent                      → insert as <li> after the last bullet, or append <p>.
 export async function appendAutoRenewalEntry(
   noteId: string,
-  html: string,
+  rawHtml: string,
   nextMsiYear: number,
   renewalCount: number
 ): Promise<void> {
+  // Decode HTML entities so dash-matching regexes work regardless of how the note was typed.
+  const html = rawHtml
+    .replace(/&ndash;/gi, "–")
+    .replace(/&mdash;/gi, "—")
+    .replace(/&minus;/gi, "−")
+    .replace(/&#8211;/gi, "–")
+    .replace(/&#8212;/gi, "—")
+    .replace(/&#x2013;/gi, "–")
+    .replace(/&#x2014;/gi, "—")
+    .replace(/&nbsp;/gi, " ");
+
   const formatted = new Intl.NumberFormat("en-US").format(renewalCount);
 
   // Already italic — nothing to do
@@ -668,7 +679,7 @@ export async function appendAutoRenewalEntry(
 
   // Non-italic entry exists — italicize in place
   const existingEntry = new RegExp(
-    `(>)([ \\t]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\s*[-–—][^<]*)(<)`,
+    `(>)([ \\t]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\s*[-–—−][^<]*)(<)`,
     "gi"
   );
   if (existingEntry.test(html)) {
@@ -680,9 +691,19 @@ export async function appendAutoRenewalEntry(
     return;
   }
 
-  // No entry for this year — append a new italic line
-  const newLine = `<p><em>MSI Year ${nextMsiYear} - ${formatted}</em></p>`;
-  await updateNoteBody(noteId, html.trimEnd() + "\n" + newLine);
+  // No entry for this year — insert as a bullet after the last </li> if bullets
+  // are present; otherwise append a plain <p> at the end.
+  const newEntry = `<em>MSI Year ${nextMsiYear} - ${formatted}</em>`;
+  const lastLiEnd = html.lastIndexOf("</li>");
+  if (lastLiEnd !== -1) {
+    const insertAt = lastLiEnd + 5; // just after </li>
+    await updateNoteBody(
+      noteId,
+      html.slice(0, insertAt) + `<li>${newEntry}</li>` + html.slice(insertAt)
+    );
+  } else {
+    await updateNoteBody(noteId, html.trimEnd() + `\n<p>${newEntry}</p>`);
+  }
 }
 
 // Sum all line items on a deal and write the annual MRR (total / 12) to `amount`.

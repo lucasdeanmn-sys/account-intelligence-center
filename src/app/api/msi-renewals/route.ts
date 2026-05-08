@@ -55,7 +55,7 @@ function parseM1Note(
 
   // Helper: extract max year number mentioned in a note body
   function maxYearInNote(body: string): number {
-    const re = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*[\d,]+/gi;
+    const re = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*[\d,]+/gi;
     let max = 0;
     let hit: RegExpExecArray | null;
     while ((hit = re.exec(body)) !== null) max = Math.max(max, parseInt(hit[1], 10));
@@ -97,11 +97,23 @@ function parseM1Note(
     });
   }
 
-  const html = m1Note.body;
+  const rawHtml = m1Note.body;
   const m1NoteId = m1Note.id ?? null;
 
+  // Decode common HTML entities that HubSpot may store (e.g. &ndash; for –) so
+  // the dash-matching regexes below work regardless of how the note was typed.
+  const html = rawHtml
+    .replace(/&ndash;/gi, "–")
+    .replace(/&mdash;/gi, "—")
+    .replace(/&minus;/gi, "−")
+    .replace(/&#8211;/gi, "–")
+    .replace(/&#8212;/gi, "—")
+    .replace(/&#x2013;/gi, "–")
+    .replace(/&#x2014;/gi, "—")
+    .replace(/&nbsp;/gi, " ");
+
   // Year entry pattern: "MSI Year N - X,XXX" or "Year N - X,XXX" (some notes omit "MSI")
-  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*([\d,]+)/i;
+  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*([\d,]+)/i;
 
   // Collect italic (already-invoiced) entries
   const italicEntries = new Map<number, number>();
@@ -121,7 +133,7 @@ function parseM1Note(
   // Handles both "Year N - 1,000 (opt_paren)" and paren-only "Year N - (1,000)".
   const withoutItalics = html.replace(/<(?:em|i)[^>]*>[\s\S]*?<\/(?:em|i)>/gi, "");
   const nonItalicEntries = new Map<number, { main: number | null; paren: number | null }>();
-  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—]\s*(?:([\d,]+)(?:\s*\(([^)]*)\))?|\(([^)]*)\))/gi;
+  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*(?:([\d,]+)(?:\s*\(([^)]*)\))?|\(([^)]*)\))/gi;
   while ((m = niRe.exec(withoutItalics)) !== null) {
     const yr = parseInt(m[1], 10);
     const main = m[2] ? parseCount(m[2]) : null;                   // normal "N - count" form
