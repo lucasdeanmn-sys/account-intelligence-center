@@ -107,15 +107,33 @@ function ConfirmModal({ entry, onCancel, onConfirm }: ConfirmModalProps) {
             </div>
           </div>
 
-          {/* Actions on both deals */}
+          {/* Actions */}
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-sm">
               <CheckCircle size={13} style={{ color: "#22c55e" }} />
               <span style={{ color: "#94a3b8" }}>
-                Move renewal deal to <span className="text-white font-medium">Closed Won</span>
+                Set renewal deal to{" "}
+                <span className="text-white font-medium">Closed Won — Ready for Billing</span>
                 {" · "}Close date: <span className="text-white font-medium">{expDate}</span>
               </span>
             </div>
+            {entry.orderFormLicense === null && entry.m1NoteId && entry.nextMsiYear && (
+              <div className="flex items-center gap-2 text-sm">
+                <CheckCircle size={13} style={{ color: "#22c55e" }} />
+                <span style={{ color: "#94a3b8" }}>
+                  Add <em style={{ color: "#c4b5fd" }}>italic</em> Year {entry.nextMsiYear} entry to M1 note{" "}
+                  <span style={{ color: "#6366f1" }}>({entry.renewalCount?.toLocaleString()} circuits)</span>
+                </span>
+              </div>
+            )}
+            {entry.hasExtension && (
+              <div className="flex items-center gap-2 text-sm">
+                <CheckCircle size={13} style={{ color: "#f59e0b" }} />
+                <span style={{ color: "#94a3b8" }}>
+                  Copy <span className="text-white font-medium">extension line items</span> to renewal deal
+                </span>
+              </div>
+            )}
             <div className="flex items-center gap-2 text-sm">
               <CheckCircle size={13} style={{ color: "#22c55e" }} />
               <span style={{ color: "#94a3b8" }}>
@@ -647,6 +665,10 @@ export default function MSITrackerPage() {
         currentYearLicense: entry.currentYearLicense,
         csaCount: entry.csaCount,
         csaRounded: entry.csaRounded,
+        m1NoteId: entry.m1NoteId,
+        m1NoteHtml: entry.m1NoteHtml,
+        nextMsiYear: entry.nextMsiYear,
+        hasExtension: entry.hasExtension,
       }),
     });
     const data = await res.json();

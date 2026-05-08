@@ -5,6 +5,10 @@ import {
   updateLineItem,
   updateDealProperties,
   getClosedWonStage,
+  cloneLineItemsToDeal,
+  getExtensionDealForCompany,
+  appendAutoRenewalEntry,
+  createLineItem,
 } from "@/lib/hubspot";
 import { appendRenewalRow } from "@/lib/sheets";
 import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
@@ -26,6 +30,11 @@ export async function POST(req: NextRequest) {
       currentYearLicense,
       csaCount,
       csaRounded,
+      // New fields
+      m1NoteId,
+      m1NoteHtml,
+      nextMsiYear,
+      hasExtension,
     } = await req.json();
 
     if (!currentDealId || !renewalDealName || !renewalCount || !expirationDate) {
@@ -35,12 +44,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Get or create the renewal deal
+    // 1. Resolve the pipeline stage ("Closed Won - Ready for Billing")
+    const stage = await getClosedWonStage("renewal").catch(() => null);
+
+    // 2. Create or identify the renewal deal
     let renewalDealId = existingRenewalDealId as string | null;
     let action: "created" | "updated" = "updated";
-
-    // Look up the Software Renewal Pipeline closed won stage
-    const stage = await getClosedWonStage("renewal").catch(() => null);
 
     if (!renewalDealId) {
       const newDeal = await createMsiRenewalDeal(
@@ -54,7 +63,7 @@ export async function POST(req: NextRequest) {
       action = "created";
     }
 
-    // 2. Update the renewal deal: stage → Closed Won, close date = expirationDate
+    // 3. Set the renewal deal to Closed Won - Ready for Billing, update dates
     const dealUpdates: Record<string, string> = {
       closedate: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
     };
@@ -64,21 +73,55 @@ export async function POST(req: NextRequest) {
     }
     await updateDealProperties(renewalDealId!, dealUpdates);
 
-    // 3. Update line item quantity on the renewal deal
-    const lineItems = await getDealLineItems(renewalDealId!).catch(() => []);
-    if (lineItems.length > 0) {
-      // Update the first line item
-      await updateLineItem(lineItems[0].id, renewalCount);
-    }
-    // If no line items exist, skip — user will need to add manually
-    // (flagged in the UI confirmation)
+    // 4. Line items ─────────────────────────────────────────────────────────
+    const existingLineItems = await getDealLineItems(renewalDealId!).catch(() => []);
+    let hadLineItems = existingLineItems.length > 0;
 
-    // 4. Set service_terminated on the current (expiring) deal
+    if (existingLineItems.length > 0) {
+      // Renewal deal already has line items — just update the primary quantity
+      await updateLineItem(existingLineItems[0].id, renewalCount);
+    } else {
+      // New deal — clone line items from the current (expiring) deal with updated qty
+      await cloneLineItemsToDeal(currentDealId, renewalDealId!, renewalCount).catch((e) => {
+        console.warn("Line item clone failed (non-fatal):", e.message);
+      });
+      hadLineItems = true;
+    }
+
+    // 4b. If the company has an active extension deal, also copy its line items
+    //     onto the renewal deal so billing for the full term is in one place.
+    if (hasExtension && company) {
+      const ext = await getExtensionDealForCompany(company).catch(() => null);
+      if (ext?.lineItems?.length) {
+        await Promise.all(
+          ext.lineItems.map((item: any) =>
+            createLineItem(
+              renewalDealId!,
+              item.properties?.name ?? "MSI Extension",
+              parseInt(item.properties?.quantity ?? "1", 10),
+              item.properties?.price ?? null,
+              null,
+              item.properties?.hs_product_id ?? null
+            ).catch(() => null) // non-fatal
+          )
+        );
+      }
+    }
+
+    // 5. For auto-renew deals (no order form), mark the new year in the M1 note
+    //    as invoiced by appending/italicizing "MSI Year N - X,XXX".
+    if (!orderFormLicense && m1NoteId && m1NoteHtml && nextMsiYear && renewalCount) {
+      await appendAutoRenewalEntry(m1NoteId, m1NoteHtml, nextMsiYear, renewalCount).catch((e) => {
+        console.warn("M1 note auto-renew update failed (non-fatal):", e.message);
+      });
+    }
+
+    // 6. Set service_terminated on the current (expiring) deal
     await updateDealProperties(currentDealId, {
       service_terminated: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
     });
 
-    // 5. Append to Google Sheet (best-effort)
+    // 7. Append to Google Sheet (best-effort)
     if (googleConfigured() && company) {
       const monthLabel = new Date(expirationDate + "T00:00:00.000Z").toLocaleString("en-US", {
         month: "long",
@@ -98,7 +141,7 @@ export async function POST(req: NextRequest) {
       success: true,
       renewalDealId,
       action,
-      hadLineItems: lineItems.length > 0,
+      hadLineItems,
     });
   } catch (error: any) {
     console.error("MSI renewal process error:", error);

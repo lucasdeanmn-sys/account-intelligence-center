@@ -418,25 +418,45 @@ export async function updateDealProperties(dealId: string, properties: Record<st
   return hs("PATCH", `/crm/v3/objects/deals/${dealId}`, { properties });
 }
 
-// Returns { pipelineId, stageId } for the Closed Won stage in the named pipeline
+// Returns { pipelineId, stageId } for the "Closed Won - Ready for Billing" stage.
+// Searches the pipeline whose label contains pipelineNameSubstring first; if not
+// found, falls back to scanning every pipeline for a "ready for billing" stage.
 export async function getClosedWonStage(pipelineNameSubstring: string): Promise<{ pipelineId: string; stageId: string } | null> {
   const res = await hs("GET", "/crm/v3/pipelines/deals");
   const pipelines: any[] = res.results ?? [];
-  const pipeline = pipelines.find((p: any) =>
+
+  const isTargetStage = (label: string) => {
+    const l = label.toLowerCase();
+    return l.includes("ready for billing") || l.includes("billing");
+  };
+  const isFallbackClosedWon = (s: any) =>
+    s.metadata?.isClosed === "true" && s.metadata?.probability === "1.0";
+
+  // 1. Try the named pipeline first
+  const named = pipelines.find((p: any) =>
     p.label?.toLowerCase().includes(pipelineNameSubstring.toLowerCase())
   );
-  if (!pipeline) return null;
-  const stages: any[] = pipeline.stages ?? [];
-  // Prefer "Ready for Billing" stage; fall back to any closed-won stage
-  const closedWon =
-    stages.find((s: any) =>
-      s.label?.toLowerCase().includes("billing") ||
-      s.label?.toLowerCase().includes("ready for billing")
-    ) ??
-    stages.find((s: any) =>
-      s.metadata?.isClosed === "true" && s.metadata?.probability === "1.0"
-    );
-  return closedWon ? { pipelineId: pipeline.id, stageId: closedWon.id } : null;
+  if (named) {
+    const stages: any[] = named.stages ?? [];
+    const s = stages.find((s: any) => isTargetStage(s.label ?? "")) ?? stages.find(isFallbackClosedWon);
+    if (s) return { pipelineId: named.id, stageId: s.id };
+  }
+
+  // 2. Scan all pipelines for "Ready for Billing"
+  for (const p of pipelines) {
+    const stages: any[] = p.stages ?? [];
+    const s = stages.find((s: any) => isTargetStage(s.label ?? ""));
+    if (s) return { pipelineId: p.id, stageId: s.id };
+  }
+
+  // 3. Last resort: any closed-won stage in any pipeline
+  for (const p of pipelines) {
+    const stages: any[] = p.stages ?? [];
+    const s = stages.find(isFallbackClosedWon);
+    if (s) return { pipelineId: p.id, stageId: s.id };
+  }
+
+  return null;
 }
 
 export async function createMsiRenewalDeal(
@@ -474,4 +494,93 @@ export async function createLineItem(
   const item = await hs("POST", "/crm/v3/objects/line_items", { properties });
   await associate("line_items", item.id, "deals", dealId);
   return item;
+}
+
+// Clone all line items from sourceDealId to targetDealId.
+// The first (primary) line item's quantity is replaced with renewalCount;
+// any additional line items (add-ons) are copied as-is.
+export async function cloneLineItemsToDeal(
+  sourceDealId: string,
+  targetDealId: string,
+  renewalCount: number
+): Promise<void> {
+  const items = await getDealLineItems(sourceDealId).catch(() => []);
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const qty = i === 0 ? renewalCount : parseInt(item.properties?.quantity ?? "1", 10);
+    await createLineItem(
+      targetDealId,
+      item.properties?.name ?? "MSI License",
+      qty,
+      item.properties?.price ?? null,
+      null,
+      item.properties?.hs_product_id ?? null
+    );
+  }
+}
+
+// Look up the active (non-terminated) extension deal for a company and return
+// its ID + line items so the process route can copy them to the renewal deal.
+export async function getExtensionDealForCompany(
+  company: string
+): Promise<{ id: string; lineItems: any[] } | null> {
+  const deals = await searchDeals(
+    [
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "Extension" },
+    ],
+    ["dealname", "service_terminated"],
+    200
+  ).catch(() => []);
+
+  const needle = company.toLowerCase();
+  for (const deal of deals) {
+    if (deal.properties?.service_terminated) continue;
+    const name: string = deal.properties?.dealname ?? "";
+    if (!/extension/i.test(name)) continue;
+    const idx = name.indexOf(" (MSI");
+    if (idx <= 0) continue;
+    if (name.slice(0, idx).trim().toLowerCase() !== needle) continue;
+    const lineItems = await getDealLineItems(deal.id).catch(() => []);
+    return { id: deal.id, lineItems };
+  }
+  return null;
+}
+
+// For auto-renew deals: write an italic "MSI Year N - X,XXX" entry into the M1 note.
+// • If the year already appears italic  → no-op.
+// • If it appears non-italic            → wrap the existing line in <em>.
+// • If it's absent                      → append a new italic <p> at the end.
+export async function appendAutoRenewalEntry(
+  noteId: string,
+  html: string,
+  nextMsiYear: number,
+  renewalCount: number
+): Promise<void> {
+  const formatted = new Intl.NumberFormat("en-US").format(renewalCount);
+
+  // Already italic — nothing to do
+  const alreadyItalic = new RegExp(
+    `<(?:em|i)[^>]*>[^<]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\b`,
+    "i"
+  );
+  if (alreadyItalic.test(html)) return;
+
+  // Non-italic entry exists — italicize in place
+  const existingEntry = new RegExp(
+    `(>)([ \\t]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\s*[-–—][^<]*)(<)`,
+    "gi"
+  );
+  if (existingEntry.test(html)) {
+    const updated = html.replace(
+      existingEntry,
+      (_, open, content, close) => `${open}<em>${content.trim()}</em>${close}`
+    );
+    await updateNoteBody(noteId, updated);
+    return;
+  }
+
+  // No entry for this year — append a new italic line
+  const newLine = `<p><em>MSI Year ${nextMsiYear} - ${formatted}</em></p>`;
+  await updateNoteBody(noteId, html.trimEnd() + "\n" + newLine);
 }
