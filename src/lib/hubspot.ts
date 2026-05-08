@@ -544,9 +544,27 @@ export async function createLineItem(
   return item;
 }
 
+// Maps renewal circuit count to the correct MSI product catalog ID.
+// Tiers match the HubSpot product library (MSI 1k-2.5k, 2.5k-5k, …).
+const MSI_PRODUCT_TIERS: { max: number; id: string }[] = [
+  { max: 2_500,     id: "1618654015" }, // MSI (1k-2.5k)
+  { max: 5_000,     id: "1618656776" }, // MSI (2.5k-5k)
+  { max: 10_000,    id: "1618656777" }, // MSI (5k-10k)
+  { max: 50_000,    id: "1618654016" }, // MSI (10k-50k)
+  { max: 100_000,   id: "2086570789" }, // MSI (50k-100k)
+  { max: 500_000,   id: "2086400308" }, // MSI (100k-500k)
+  { max: 800_000,   id: "2086400312" }, // MSI (500k-800k)
+  { max: 2_000_000, id: "2086570803" }, // MSI (800k-2M)
+  { max: 4_000_000, id: "2086400317" }, // MSI (2M-4M)
+];
+
+function getMsiProductId(renewalCount: number): string | null {
+  return MSI_PRODUCT_TIERS.find((t) => renewalCount <= t.max)?.id ?? null;
+}
+
 // Clone all line items from sourceDealId to targetDealId.
-// The first (primary) line item's quantity is replaced with renewalCount;
-// any additional line items (add-ons) are copied as-is.
+// The first (primary) line item always uses the matching catalog product so
+// HubSpot auto-populates the amount; add-on items are copied as-is.
 export async function cloneLineItemsToDeal(
   sourceDealId: string,
   targetDealId: string,
@@ -555,16 +573,31 @@ export async function cloneLineItemsToDeal(
   const items = await getDealLineItems(sourceDealId).catch(() => []);
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const qty = i === 0 ? renewalCount : parseInt(item.properties?.quantity ?? "1", 10);
-    await createLineItem(
-      targetDealId,
-      item.properties?.name ?? "MSI License",
-      qty,
-      item.properties?.price ?? null,
-      null,
-      item.properties?.hs_product_id ?? null,
-      item.properties?.recurringbillingfrequency ?? null
-    );
+    if (i === 0) {
+      // Primary MSI line item — use the catalog product (no custom price) so
+      // HubSpot pulls the list price and amount auto-populates.
+      const productId = getMsiProductId(renewalCount);
+      await createLineItem(
+        targetDealId,
+        item.properties?.name ?? "MSI License",
+        renewalCount,
+        null, // let catalog populate price/amount
+        null,
+        productId,
+        item.properties?.recurringbillingfrequency ?? "annually"
+      );
+    } else {
+      // Add-on line items — clone as-is
+      await createLineItem(
+        targetDealId,
+        item.properties?.name ?? "MSI Add-on",
+        parseInt(item.properties?.quantity ?? "1", 10),
+        item.properties?.price ?? null,
+        null,
+        item.properties?.hs_product_id ?? null,
+        item.properties?.recurringbillingfrequency ?? null
+      );
+    }
   }
 }
 
