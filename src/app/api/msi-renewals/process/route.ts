@@ -165,7 +165,7 @@ export async function POST(req: NextRequest) {
       await appendRenewalRow(monthLabel, {
         company,
         instanceName: csaInstanceName ?? null,
-        currentLicense: orderFormLicense ?? currentYearLicense ?? null,
+        currentLicense: currentYearLicense ?? null,   // current year's invoiced count, not next year's order form
         csaCount: csaCount ?? null,
         csaRounded: csaRounded ?? null,
         renewalCount,
