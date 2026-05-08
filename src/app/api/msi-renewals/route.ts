@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getDealNotes, getDealCompanyNocIds } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
@@ -219,19 +219,24 @@ export async function GET(req: NextRequest) {
     const renewalStartDate = addOneYear(startDate);
     const expirationDate = lastDayOfPreviousMonth(renewalStartDate);
 
-    // Fetch HubSpot deals and CSA data in parallel — CSA errors are non-fatal
-    const [currentDeals, renewalDeals, csaResult] = await Promise.all([
+    // Fetch HubSpot deals, active extensions, and CSA data in parallel.
+    // CSA errors are non-fatal; extension company lookup failure defaults to empty set.
+    const [currentDeals, renewalDeals, csaResult, extensionCompanies] = await Promise.all([
       getMsiDealsByStartDate(startDate),
       getMsiDealsByStartDate(renewalStartDate),
       fetchCsaForMonth(expirationDate).catch((err: Error) => {
         console.error("CSA fetch error (non-fatal):", err.message);
         return null;
       }),
+      getActiveExtensionCompanies().catch(() => new Set<string>()),
     ]);
 
-    const filtered = currentDeals.filter((d: any) =>
-      d.properties?.dealname?.includes("(MSI")
-    );
+    // Keep only main MSI deals — extension deals live in the extensions pipeline
+    // and are excluded here; they surface as the hasExtension flag on the parent deal.
+    const filtered = currentDeals.filter((d: any) => {
+      const name: string = d.properties?.dealname ?? "";
+      return name.includes("(MSI") && !/extension/i.test(name);
+    });
 
     if (!filtered.length) {
       return NextResponse.json({
@@ -308,13 +313,13 @@ export async function GET(req: NextRequest) {
       const renewalDealName = `${company} (MSI - Year ${nextMsiYear ?? "?"})`;
 
       const dealName = deal.properties?.dealname ?? "";
-      const isExtension = /extension/i.test(dealName);
+      const hasExtension = extensionCompanies.has(company.toLowerCase());
 
       return {
         currentDealId: deal.id,
         currentDealName: dealName,
         company,
-        isExtension,
+        hasExtension,
         msiYear,
         nextMsiYear,
         orderFormLicense,

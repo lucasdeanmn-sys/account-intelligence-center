@@ -37,11 +37,6 @@ export async function POST(req: NextRequest) {
     const results: { company: string; status: "updated" | "skipped" | "error"; reason?: string }[] = [];
 
     for (const deal of deals) {
-      // Only process regular renewals with an M1 note
-      if (deal.isExtension) {
-        results.push({ company: deal.company, status: "skipped", reason: "extension" });
-        continue;
-      }
       if (!deal.m1NoteId || !deal.m1NoteHtml) {
         results.push({ company: deal.company, status: "skipped", reason: "no M1 note" });
         continue;

@@ -100,7 +100,9 @@ export interface RenewalEntry {
   currentDealId: string;
   currentDealName: string;
   company: string;
-  isExtension: boolean;
+  /** True when the company also has an active prorated extension deal in HubSpot.
+   *  Extension deals themselves are excluded from this list entirely. */
+  hasExtension: boolean;
   msiYear: number | null;
   nextMsiYear: number | null;
   orderFormLicense: number | null;

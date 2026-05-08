@@ -367,6 +367,29 @@ export async function getDealCompanyNocIds(
   return result;
 }
 
+// Returns the set of company names (lowercase) that currently have an active
+// MSI extension deal — used to annotate renewal entries with hasExtension.
+export async function getActiveExtensionCompanies(): Promise<Set<string>> {
+  const deals = await searchDeals(
+    [
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "Extension" },
+    ],
+    ["dealname", "service_terminated"],
+    200
+  ).catch(() => []);
+
+  const companies = new Set<string>();
+  for (const deal of deals) {
+    // Skip if the extension term has already been terminated
+    if (deal.properties?.service_terminated) continue;
+    const name: string = deal.properties?.dealname ?? "";
+    const idx = name.indexOf(" (MSI");
+    if (idx > 0) companies.add(name.slice(0, idx).trim().toLowerCase());
+  }
+  return companies;
+}
+
 export async function getMsiDealsByStartDate(
   isoDate: string,
   pipelineId?: string

@@ -23,8 +23,8 @@ export async function POST(req: NextRequest) {
     }
 
     const sorted = [...deals].sort((a, b) => a.company.localeCompare(b.company));
-    const renewals = sorted.filter((d) => !d.isExtension);
-    const extensions = sorted.filter((d) => d.isExtension);
+    const renewals = sorted; // extension deals are no longer included in the list at all
+    const extensions = sorted.filter((d) => d.hasExtension);
 
     const formatLine = (d: RenewalEntry) => {
       const count = d.renewalCount?.toLocaleString() ?? "TBD";
