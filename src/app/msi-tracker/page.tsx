@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Search,
   Loader2,
@@ -14,6 +14,13 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { RenewalEntry } from "@/lib/types";
+import type { CsaInstance } from "@/app/api/msi-renewals/csa/route";
+
+interface CsaOverride {
+  instanceId: number;
+  instanceName: string;
+}
+const CSA_OVERRIDES_KEY = "csaOverrides_v1";
 
 // ─── Confirmation Modal ───────────────────────────────────────────────────────
 
@@ -392,6 +399,123 @@ function DealRow({ entry, onProcess }: DealRowProps) {
   );
 }
 
+// ─── CSA Mapping Panel ────────────────────────────────────────────────────────
+
+interface CsaMappingPanelProps {
+  deals: RenewalEntry[];
+  instances: CsaInstance[];
+  overrides: Record<string, CsaOverride>;
+  onLink: (company: string, instanceName: string) => void;
+  onClear: (company: string) => void;
+}
+
+function CsaMappingPanel({ deals, instances, overrides, onLink, onClear }: CsaMappingPanelProps) {
+  const unmatched = deals.filter((d) => d.csaCount === null);
+  if (!unmatched.length) return null;
+
+  // Sort instances alphabetically for the datalist
+  const sorted = [...instances].sort((a, b) => a.instanceName.localeCompare(b.instanceName));
+
+  return (
+    <div className="mt-4 rounded-xl border p-4" style={{ backgroundColor: "#1a1d27", borderColor: "#252836" }}>
+      <p className="text-xs font-semibold mb-1" style={{ color: "#f59e0b" }}>
+        CSA — {unmatched.length} unmatched {unmatched.length === 1 ? "company" : "companies"}
+      </p>
+      <p className="text-xs mb-4" style={{ color: "#475569" }}>
+        Link each company to its CSA instance. Matches are saved and used on future fetches.
+      </p>
+
+      {/* Hidden datalist for all instances */}
+      <datalist id="csa-instance-list">
+        {sorted.map((i) => (
+          <option key={i.instanceName} value={i.instanceName}>
+            {i.instanceName} · {i.circuits.toLocaleString()} circuits
+            {i.domain ? ` · ${i.domain}` : ""}
+            {i.instanceId ? ` · ID ${i.instanceId}` : ""}
+          </option>
+        ))}
+      </datalist>
+
+      <div className="space-y-2">
+        {unmatched.map((d) => (
+          <CsaMatchRow
+            key={d.currentDealId}
+            company={d.company}
+            override={overrides[d.company]}
+            instances={sorted}
+            onLink={onLink}
+            onClear={onClear}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface CsaMatchRowProps {
+  company: string;
+  override: CsaOverride | undefined;
+  instances: CsaInstance[];
+  onLink: (company: string, instanceName: string) => void;
+  onClear: (company: string) => void;
+}
+
+function CsaMatchRow({ company, override, instances, onLink, onClear }: CsaMatchRowProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState(override?.instanceName ?? "");
+
+  // Keep input in sync when override changes externally
+  useEffect(() => {
+    setQuery(override?.instanceName ?? "");
+  }, [override?.instanceName]);
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const val = e.target.value;
+    setQuery(val);
+    // Auto-link if the typed value exactly matches an instance name
+    const match = instances.find((i) => i.instanceName === val);
+    if (match) onLink(company, val);
+  }
+
+  function handleClear() {
+    setQuery("");
+    onClear(company);
+    inputRef.current?.focus();
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <p className="text-sm text-white w-48 shrink-0 truncate" title={company}>{company}</p>
+      <div className="flex items-center gap-1 flex-1 min-w-0">
+        <input
+          ref={inputRef}
+          list="csa-instance-list"
+          value={query}
+          onChange={handleChange}
+          placeholder="Search CSA instance…"
+          className="flex-1 min-w-0 px-3 py-1.5 rounded-lg border text-sm text-white focus:outline-none focus:border-indigo-500"
+          style={{ backgroundColor: "#0f1117", borderColor: query ? "#6366f1" : "#252836" }}
+        />
+        {query && (
+          <button
+            onClick={handleClear}
+            className="p-1.5 rounded-lg transition-colors"
+            style={{ color: "#64748b" }}
+            title="Clear"
+          >
+            <X size={13} />
+          </button>
+        )}
+      </div>
+      {override && (
+        <span className="text-xs shrink-0" style={{ color: "#22c55e" }}>
+          Linked · ID {override.instanceId}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 const MONTHS = [
@@ -416,6 +540,46 @@ export default function MSITrackerPage() {
   const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[] } | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
   const [csaLoading, setCsaLoading] = useState(false);
+  const [csaInstances, setCsaInstances] = useState<CsaInstance[]>([]);
+  const [csaOverrides, setCsaOverrides] = useState<Record<string, CsaOverride>>(() => {
+    try { return JSON.parse(localStorage.getItem(CSA_OVERRIDES_KEY) ?? "{}"); }
+    catch { return {}; }
+  });
+
+  // Persist overrides to localStorage whenever they change
+  useEffect(() => {
+    localStorage.setItem(CSA_OVERRIDES_KEY, JSON.stringify(csaOverrides));
+  }, [csaOverrides]);
+
+  function applyOverride(company: string, instanceName: string) {
+    const inst = csaInstances.find((i) => i.instanceName === instanceName);
+    if (!inst) return;
+    const override: CsaOverride = { instanceId: inst.instanceId ?? 0, instanceName };
+    setCsaOverrides((prev) => ({ ...prev, [company]: override }));
+    // Update the deal immediately from already-fetched data
+    setDeals((prev) =>
+      prev.map((d) => {
+        if (d.company !== company) return d;
+        const csaCount = inst.circuits;
+        const csaRounded = Math.max(1000, Math.ceil(csaCount / 50) * 50);
+        let renewalCount: number | null = null;
+        if (d.orderFormLicense !== null) {
+          renewalCount = d.orderFormLicense;
+        } else {
+          renewalCount = Math.max(csaRounded, d.currentYearLicense ?? 0);
+        }
+        return { ...d, csaCount, csaRounded, renewalCount };
+      })
+    );
+  }
+
+  function clearOverride(company: string) {
+    setCsaOverrides((prev) => {
+      const next = { ...prev };
+      delete next[company];
+      return next;
+    });
+  }
 
   async function runReport() {
     if (!month || !year) return;
@@ -482,16 +646,19 @@ export default function MSITrackerPage() {
       const res = await fetch("/api/msi-renewals/csa", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companies }),
+        body: JSON.stringify({ companies, overrides: csaOverrides }),
       });
       const text = await res.text();
       let data: any;
       try { data = JSON.parse(text); } catch { throw new Error(`CSA error: ${text.slice(0, 200)}`); }
       if (!res.ok) throw new Error(data.error || "CSA lookup failed");
+
+      // Store the full instance list for the picker
+      if (data.instances?.length) setCsaInstances(data.instances);
+
       const counts: Record<string, number | null> = data.counts ?? {};
       setDeals((prev) => prev.map((d) => {
-        const csaCount = counts[d.company] ??
-          Object.entries(counts).find(([k]) => k.toLowerCase().includes(d.company.toLowerCase().slice(0, 6)))?.[1] ?? null;
+        const csaCount = counts[d.company] ?? null;
         const csaRounded = csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
         let renewalCount: number | null = null;
         if (d.orderFormLicense !== null) {
@@ -663,6 +830,17 @@ export default function MSITrackerPage() {
           />
         ))}
       </div>
+
+      {/* CSA Mapping — shown after a fetch when some companies didn't auto-match */}
+      {csaInstances.length > 0 && deals.some((d) => d.csaCount === null) && (
+        <CsaMappingPanel
+          deals={deals}
+          instances={csaInstances}
+          overrides={csaOverrides}
+          onLink={applyOverride}
+          onClear={clearOverride}
+        />
+      )}
 
       {/* Empty state */}
       {!loading && deals.length === 0 && !error && (
