@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMsiDealsByStartDate, getDealNotes, getDealCompanyNocIds } from "@/lib/hubspot";
+import { fetchCsaForMonth } from "@/lib/csa";
+import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
 
 export const maxDuration = 60;
@@ -217,9 +219,14 @@ export async function GET(req: NextRequest) {
     const renewalStartDate = addOneYear(startDate);
     const expirationDate = lastDayOfPreviousMonth(renewalStartDate);
 
-    const [currentDeals, renewalDeals] = await Promise.all([
+    // Fetch HubSpot deals and CSA data in parallel — CSA errors are non-fatal
+    const [currentDeals, renewalDeals, csaResult] = await Promise.all([
       getMsiDealsByStartDate(startDate),
       getMsiDealsByStartDate(renewalStartDate),
+      fetchCsaForMonth(expirationDate).catch((err: Error) => {
+        console.error("CSA fetch error (non-fatal):", err.message);
+        return null;
+      }),
     ]);
 
     const filtered = currentDeals.filter((d: any) =>
@@ -227,7 +234,13 @@ export async function GET(req: NextRequest) {
     );
 
     if (!filtered.length) {
-      return NextResponse.json({ deals: [], expirationDate, renewalStartDate });
+      return NextResponse.json({
+        deals: [],
+        expirationDate,
+        renewalStartDate,
+        csaInstances: csaResult?.allInstances ?? [],
+        csaError: csaResult === null ? "CSA data unavailable" : null,
+      });
     }
 
     const renewalDealMap = new Map<string, any>();
@@ -256,6 +269,9 @@ export async function GET(req: NextRequest) {
       parsedMap.set(deal.id, parsed);
     }
 
+    // CSA id → circuits map (empty if CSA fetch failed)
+    const csaIdMap: Map<number, number> = csaResult?.idMap ?? new Map();
+
     // Build enriched entries
     const entries: RenewalEntry[] = filtered.map((deal: any) => {
       const company = extractCompany(deal.properties?.dealname ?? "");
@@ -273,11 +289,14 @@ export async function GET(req: NextRequest) {
       const orderFormLicense: number | null = parsed.orderFormLicense ?? null;
       const currentYearLicense: number | null = parsed.currentYearLicense ?? null;
 
-      const csaCount: number | null = null;
-      const csaRounded: number | null = null;
+      // ID-based CSA match: noc_instance_id → CSA circuits
+      const nocInstanceId = nocIdMap.get(deal.id) ?? null;
+      const csaCount: number | null =
+        nocInstanceId != null ? (csaIdMap.get(nocInstanceId) ?? null) : null;
+      const csaRounded: number | null =
+        csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
 
-      // Order form always wins when present (even if smaller than current).
-      // Auto-renew: take max of CSA and current year license.
+      // Order form always wins; auto-renew takes max(CSA rounded, current year)
       let renewalCount: number | null = null;
       if (orderFormLicense !== null) {
         renewalCount = orderFormLicense;
@@ -309,13 +328,16 @@ export async function GET(req: NextRequest) {
         expirationDate,
         m1NoteHtml: parsed.m1NoteHtml ?? null,
         m1NoteId: parsed.m1NoteId ?? null,
-        nocInstanceId: nocIdMap.get(deal.id) ?? null,
+        nocInstanceId,
       };
     });
 
     entries.sort((a, b) => a.company.localeCompare(b.company));
 
-    return NextResponse.json({ deals: entries, expirationDate, renewalStartDate });
+    const csaInstances: CsaInstance[] = csaResult?.allInstances ?? [];
+    const csaError: string | null = csaResult === null ? "CSA data unavailable" : null;
+
+    return NextResponse.json({ deals: entries, expirationDate, renewalStartDate, csaInstances, csaError });
   } catch (error: any) {
     console.error("MSI renewals GET error:", error);
     return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });

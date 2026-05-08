@@ -14,7 +14,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { RenewalEntry } from "@/lib/types";
-import type { CsaInstance } from "@/app/api/msi-renewals/csa/route";
+import type { CsaInstance } from "@/lib/csa";
 
 interface CsaOverride {
   instanceId: number;
@@ -539,8 +539,8 @@ export default function MSITrackerPage() {
   const [confirmEntry, setConfirmEntry] = useState<RenewalEntry | null>(null);
   const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[] } | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
-  const [csaLoading, setCsaLoading] = useState(false);
   const [csaInstances, setCsaInstances] = useState<CsaInstance[]>([]);
+  const [csaError, setCsaError] = useState<string | null>(null);
   const [csaOverrides, setCsaOverrides] = useState<Record<string, CsaOverride>>(() => {
     try { return JSON.parse(localStorage.getItem(CSA_OVERRIDES_KEY) ?? "{}"); }
     catch { return {}; }
@@ -586,6 +586,7 @@ export default function MSITrackerPage() {
     setLoading(true);
     setError(null);
     setDeals([]);
+    setCsaError(null);
     try {
       const res = await fetch(`/api/msi-renewals?month=${month}&year=${year}`);
       const text = await res.text();
@@ -596,9 +597,32 @@ export default function MSITrackerPage() {
         throw new Error(`API error: ${text.slice(0, 300)}`);
       }
       if (!res.ok) throw new Error(data.error || "Failed to fetch renewals");
-      setDeals(data.deals ?? []);
+
+      const instances: CsaInstance[] = data.csaInstances ?? [];
+      setCsaInstances(instances);
+      if (data.csaError) setCsaError(data.csaError);
+
       setExpirationDate(data.expirationDate ?? "");
       setRenewalStartDate(data.renewalStartDate ?? "");
+
+      // Apply any stored overrides for companies that still have no CSA match
+      const overrides = csaOverrides;
+      const deals: RenewalEntry[] = (data.deals ?? []).map((d: RenewalEntry) => {
+        if (d.csaCount !== null) return d; // already matched by ID
+        const override = overrides[d.company];
+        if (!override?.instanceName) return d;
+        const inst = instances.find((i) => i.instanceName === override.instanceName);
+        if (!inst) return d;
+        const csaCount = inst.circuits;
+        const csaRounded = Math.max(1000, Math.ceil(csaCount / 50) * 50);
+        const renewalCount =
+          d.orderFormLicense !== null
+            ? d.orderFormLicense
+            : Math.max(csaRounded, d.currentYearLicense ?? 0);
+        return { ...d, csaCount, csaRounded, renewalCount };
+      });
+
+      setDeals(deals);
     } catch (e: any) {
       setError(e.message || "Failed to load renewal data");
     } finally {
@@ -635,55 +659,6 @@ export default function MSITrackerPage() {
       )
     );
     setConfirmEntry(null);
-  }
-
-  async function fetchCsa() {
-    if (!deals.length) return;
-    setCsaLoading(true);
-    setError(null);
-    try {
-      const companies = deals.map((d) => d.company);
-
-      // Build noc_instance_id map from the loaded deals
-      const nocInstanceIds: Record<string, number | null> = {};
-      for (const d of deals) {
-        if (d.nocInstanceId != null) nocInstanceIds[d.company] = d.nocInstanceId;
-      }
-
-      const payload: Record<string, unknown> = { companies, overrides: csaOverrides };
-      if (Object.keys(nocInstanceIds).length) payload.nocInstanceIds = nocInstanceIds;
-      if (expirationDate) payload.renewalDate = expirationDate;
-
-      const res = await fetch("/api/msi-renewals/csa", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const text = await res.text();
-      let data: any;
-      try { data = JSON.parse(text); } catch { throw new Error(`CSA error: ${text.slice(0, 200)}`); }
-      if (!res.ok) throw new Error(data.error || "CSA lookup failed");
-
-      // Store the full instance list for the picker
-      if (data.instances?.length) setCsaInstances(data.instances);
-
-      const counts: Record<string, number | null> = data.counts ?? {};
-      setDeals((prev) => prev.map((d) => {
-        const csaCount = counts[d.company] ?? null;
-        const csaRounded = csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
-        let renewalCount: number | null = null;
-        if (d.orderFormLicense !== null) {
-          renewalCount = d.orderFormLicense;
-        } else if (csaRounded !== null || d.currentYearLicense !== null) {
-          renewalCount = Math.max(csaRounded ?? 0, d.currentYearLicense ?? 0);
-        }
-        return { ...d, csaCount, csaRounded, renewalCount };
-      }));
-    } catch (e: any) {
-      setError(e.message || "Failed to fetch CSA counts");
-    } finally {
-      setCsaLoading(false);
-    }
   }
 
   async function generateEmail() {
@@ -795,15 +770,19 @@ export default function MSITrackerPage() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={fetchCsa}
-              disabled={csaLoading || deals.length === 0}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
-              style={{ borderColor: "#252836", color: "#94a3b8" }}
-            >
-              {csaLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-              {csaLoading ? "Fetching CSA…" : "Fetch CSA"}
-            </button>
+            {/* CSA status badge */}
+            {csaError ? (
+              <span className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ backgroundColor: "#f59e0b15", color: "#f59e0b" }}
+                title={csaError}>
+                <AlertCircle size={11} /> CSA unavailable
+              </span>
+            ) : deals.some((d) => d.csaCount !== null) ? (
+              <span className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ backgroundColor: "#22c55e15", color: "#22c55e" }}>
+                <CheckCircle size={11} /> CSA loaded
+              </span>
+            ) : null}
             <button
               onClick={generateEmail}
               disabled={emailLoading || deals.length === 0}
