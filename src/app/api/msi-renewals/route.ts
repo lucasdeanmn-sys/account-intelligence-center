@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
@@ -219,9 +219,9 @@ export async function GET(req: NextRequest) {
     const renewalStartDate = addOneYear(startDate);
     const expirationDate = lastDayOfPreviousMonth(renewalStartDate);
 
-    // Fetch HubSpot deals, active extensions, and CSA data in parallel.
-    // CSA errors are non-fatal; extension company lookup failure defaults to empty set.
-    const [currentDeals, renewalDeals, csaResult, extensionCompanies] = await Promise.all([
+    // Fetch HubSpot deals, active extensions, CSA data, and processed stage IDs in parallel.
+    // CSA errors are non-fatal; other lookups default to safe empty values.
+    const [currentDeals, renewalDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
       getMsiDealsByStartDate(startDate),
       getMsiDealsByStartDate(renewalStartDate),
       fetchCsaForMonth(expirationDate).catch((err: Error) => {
@@ -229,6 +229,7 @@ export async function GET(req: NextRequest) {
         return null;
       }),
       getActiveExtensionCompanies().catch(() => new Set<string>()),
+      getProcessedStageIds().catch(() => new Set<string>()),
     ]);
 
     // Keep only main MSI deals — extension deals live in the extensions pipeline
@@ -315,6 +316,11 @@ export async function GET(req: NextRequest) {
       const dealName = deal.properties?.dealname ?? "";
       const hasExtension = extensionCompanies.has(company.toLowerCase());
 
+      // A deal is considered processed if a renewal deal exists AND that deal
+      // is in a "Closed Won - Ready for Billing" or "Closed Won - Invoiced" stage.
+      const renewalStage: string = renewalDeal?.properties?.dealstage ?? "";
+      const processed = !!(renewalDeal && renewalStage && processedStageIds.has(renewalStage));
+
       return {
         currentDealId: deal.id,
         currentDealName: dealName,
@@ -334,6 +340,7 @@ export async function GET(req: NextRequest) {
         m1NoteHtml: parsed.m1NoteHtml ?? null,
         m1NoteId: parsed.m1NoteId ?? null,
         nocInstanceId,
+        processed,
       };
     });
 

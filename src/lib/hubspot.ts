@@ -421,6 +421,24 @@ export async function updateDealProperties(dealId: string, properties: Record<st
 // Returns { pipelineId, stageId } for the "Closed Won - Ready for Billing" stage.
 // Searches the pipeline whose label contains pipelineNameSubstring first; if not
 // found, falls back to scanning every pipeline for a "ready for billing" stage.
+// Returns the set of deal stage IDs that indicate a renewal has been fully
+// processed — specifically any stage whose label contains "ready for billing"
+// or "invoiced" across all pipelines.
+export async function getProcessedStageIds(): Promise<Set<string>> {
+  const res = await hs("GET", "/crm/v3/pipelines/deals").catch(() => ({ results: [] }));
+  const pipelines: any[] = res.results ?? [];
+  const ids = new Set<string>();
+  for (const p of pipelines) {
+    for (const s of (p.stages ?? []) as any[]) {
+      const l: string = (s.label ?? "").toLowerCase();
+      if (l.includes("ready for billing") || l.includes("invoiced")) {
+        ids.add(String(s.id));
+      }
+    }
+  }
+  return ids;
+}
+
 export async function getClosedWonStage(pipelineNameSubstring: string): Promise<{ pipelineId: string; stageId: string } | null> {
   const res = await hs("GET", "/crm/v3/pipelines/deals");
   const pipelines: any[] = res.results ?? [];
