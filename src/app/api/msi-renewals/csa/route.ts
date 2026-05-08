@@ -6,9 +6,10 @@ interface CsaRecord {
   instance: string;
   circuits: number;
   domain: string | null;
+  renewalDate: string | null;
 }
 
-// ─── Company matching (fuzzy, used when no override is set) ───────────────────
+// ─── Company matching (fuzzy, fallback when ID matching can't be used) ─────────
 
 function matchCompany(company: string, records: CsaRecord[]): CsaRecord | null {
   if (!company) return null;
@@ -110,7 +111,7 @@ async function callMcp(toolName: string, args: Record<string, unknown> = {}): Pr
 // ─── Snapshot fetch ───────────────────────────────────────────────────────────
 
 export interface CsaInstance {
-  instanceId: number | null;   // null when not returned by snapshot
+  instanceId: number | null;
   instanceName: string;
   circuits: number;
   domain: string | null;
@@ -119,6 +120,7 @@ export interface CsaInstance {
 async function fetchSnapshot(): Promise<{ records: CsaRecord[]; instances: CsaInstance[] }> {
   const parsed = await callMcp("get_snapshot", {});
 
+  // Snapshot returns { snapshot_date, total_returned, filters, companies: [...] }
   const raw: any[] = Array.isArray(parsed)
     ? parsed
     : (parsed?.companies ?? parsed?.data ?? parsed?.results ?? parsed?.records ?? Object.values(parsed));
@@ -133,10 +135,10 @@ async function fetchSnapshot(): Promise<{ records: CsaRecord[]; instances: CsaIn
       instance: r.instance as string,
       circuits: (r.circuits as number) ?? 0,
       domain: (r.domain as string | null) ?? null,
+      renewalDate: (r.renewal_date as string | null) ?? null,
     }));
 
-  // Build the picker list — snapshot doesn't include instance_id so it's null here.
-  // instance_id is resolved on the client via the stored override mapping.
+  // Snapshot instances (instanceId resolved later via get_company for target month)
   const instances: CsaInstance[] = records.map((r) => ({
     instanceId: null,
     instanceName: r.instance,
@@ -145,6 +147,71 @@ async function fetchSnapshot(): Promise<{ records: CsaRecord[]; instances: CsaIn
   }));
 
   return { records, instances };
+}
+
+// ─── Build instance_id → circuits map for a target renewal month ──────────────
+//
+// Filters snapshot records to those whose renewal_date matches the target month
+// (e.g. "2026-05"), then calls get_company for each in parallel to obtain the
+// numeric instance_id.  Returns a Map<instanceId, circuits> and an updated
+// CsaInstance list with instanceIds populated.
+
+async function buildIdMap(
+  records: CsaRecord[],
+  renewalYearMonth: string // e.g. "2026-05"
+): Promise<{ idMap: Map<number, number>; resolvedInstances: CsaInstance[] }> {
+  const idMap = new Map<number, number>();
+
+  const targets = records.filter(
+    (r) => r.renewalDate?.startsWith(renewalYearMonth) ?? false
+  );
+
+  if (!targets.length) {
+    return { idMap, resolvedInstances: [] };
+  }
+
+  // Call get_company for each target instance in parallel
+  const results = await Promise.allSettled(
+    targets.map((r) => callMcp("get_company", { name: r.instance }))
+  );
+
+  const resolvedInstances: CsaInstance[] = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+    const res = results[i];
+
+    let instanceId: number | null = null;
+    let circuits = target.circuits;
+
+    if (res.status === "fulfilled" && res.value) {
+      // get_company returns { companies: [{ instance_id, circuits, ... }] }
+      const companies: any[] = res.value?.companies ?? [];
+      // Pick the entry whose instance_name matches (could be multiple snapshots)
+      const match =
+        companies.find(
+          (c: any) =>
+            typeof c.instance_id === "number" &&
+            (c.instance_name?.toLowerCase() === target.instance.toLowerCase() ||
+              c.instance?.toLowerCase() === target.instance.toLowerCase())
+        ) ?? companies[0];
+
+      if (match?.instance_id) {
+        instanceId = match.instance_id as number;
+        circuits = (match.circuits as number) ?? circuits;
+        idMap.set(instanceId, circuits);
+      }
+    }
+
+    resolvedInstances.push({
+      instanceId,
+      instanceName: target.instance,
+      circuits,
+      domain: target.domain,
+    });
+  }
+
+  return { idMap, resolvedInstances };
 }
 
 // ─── POST /api/msi-renewals/csa ───────────────────────────────────────────────
@@ -158,37 +225,67 @@ export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as {
       companies: string[];
-      overrides?: Record<string, CsaOverride>; // hubspot company name → { instanceId, instanceName }
+      overrides?: Record<string, CsaOverride>;       // hubspot company name → { instanceId, instanceName }
+      nocInstanceIds?: Record<string, number | null>; // hubspot company name → noc_instance_id
+      renewalDate?: string;                           // ISO date like "2026-05-31" for filtering
     };
-    const { companies, overrides = {} } = body;
+    const { companies, overrides = {}, nocInstanceIds = {}, renewalDate } = body;
 
     if (!companies?.length) {
       return NextResponse.json({ error: "companies array required" }, { status: 400 });
     }
 
-    const { records, instances } = await fetchSnapshot();
+    // 1. Fetch snapshot
+    const { records, instances: allInstances } = await fetchSnapshot();
 
-    // Build exact-name lookup for fast override resolution
+    // 2. Build exact-name lookup for fast override resolution
     const byName = new Map<string, CsaRecord>();
     for (const r of records) {
       byName.set(r.instance.toLowerCase().trim(), r);
     }
 
+    // 3. Build instance_id → circuits map for the target renewal month
+    //    (only if renewalDate is provided and some companies have nocInstanceId)
+    const hasNocIds = Object.values(nocInstanceIds).some((id) => id != null);
+    let idMap = new Map<number, number>();
+    let resolvedInstances: CsaInstance[] = [];
+
+    if (renewalDate && hasNocIds) {
+      const ym = renewalDate.substring(0, 7); // "2026-05"
+      const built = await buildIdMap(records, ym);
+      idMap = built.idMap;
+      resolvedInstances = built.resolvedInstances;
+    }
+
+    // 4. Match each company
     const counts: Record<string, number | null> = {};
     for (const company of companies) {
       const override = overrides[company];
+      const nocId = nocInstanceIds[company] ?? null;
+
       if (override?.instanceName) {
-        // Exact match via stored override instance name
+        // Explicit manual override — use exact instance name from snapshot
         const r = byName.get(override.instanceName.toLowerCase().trim());
         counts[company] = r?.circuits ?? null;
+      } else if (nocId != null && idMap.has(nocId)) {
+        // ID-based exact match (most reliable)
+        counts[company] = idMap.get(nocId)!;
       } else {
-        // Fuzzy match
+        // Fuzzy name fallback (works for most companies, may miss edge cases)
         const r = matchCompany(company, records);
         counts[company] = r?.circuits ?? null;
       }
     }
 
-    return NextResponse.json({ counts, instances });
+    // 5. Build the full instance list for the picker
+    //    Resolved instances (with IDs) take priority; remaining are unresolved
+    const resolvedNames = new Set(resolvedInstances.map((i) => i.instanceName.toLowerCase()));
+    const unresolved: CsaInstance[] = allInstances.filter(
+      (i) => !resolvedNames.has(i.instanceName.toLowerCase())
+    );
+    const pickerInstances: CsaInstance[] = [...resolvedInstances, ...unresolved];
+
+    return NextResponse.json({ counts, instances: pickerInstances });
   } catch (error: any) {
     console.error("CSA lookup error:", error);
     return NextResponse.json(

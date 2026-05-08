@@ -643,10 +643,21 @@ export default function MSITrackerPage() {
     setError(null);
     try {
       const companies = deals.map((d) => d.company);
+
+      // Build noc_instance_id map from the loaded deals
+      const nocInstanceIds: Record<string, number | null> = {};
+      for (const d of deals) {
+        if (d.nocInstanceId != null) nocInstanceIds[d.company] = d.nocInstanceId;
+      }
+
+      const payload: Record<string, unknown> = { companies, overrides: csaOverrides };
+      if (Object.keys(nocInstanceIds).length) payload.nocInstanceIds = nocInstanceIds;
+      if (expirationDate) payload.renewalDate = expirationDate;
+
       const res = await fetch("/api/msi-renewals/csa", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companies, overrides: csaOverrides }),
+        body: JSON.stringify(payload),
       });
       const text = await res.text();
       let data: any;

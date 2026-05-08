@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getDealNotes } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getDealNotes, getDealCompanyNocIds } from "@/lib/hubspot";
 import type { RenewalEntry } from "@/lib/types";
 
 export const maxDuration = 60;
@@ -238,8 +238,11 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Fetch notes for all current deals
-    const notesAndItems = await fetchNotesBatched(filtered);
+    // Fetch notes and company noc_instance_ids in parallel
+    const [notesAndItems, nocIdMap] = await Promise.all([
+      fetchNotesBatched(filtered),
+      getDealCompanyNocIds(filtered.map((d: any) => d.id)),
+    ]);
 
     // Parse M1 notes with regex (fast, no AI required)
     const parsedMap = new Map<string, M1Parsed>();
@@ -306,6 +309,7 @@ export async function GET(req: NextRequest) {
         expirationDate,
         m1NoteHtml: parsed.m1NoteHtml ?? null,
         m1NoteId: parsed.m1NoteId ?? null,
+        nocInstanceId: nocIdMap.get(deal.id) ?? null,
       };
     });
 

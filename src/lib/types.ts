@@ -114,6 +114,7 @@ export interface RenewalEntry {
   expirationDate: string;
   m1NoteHtml: string | null;
   m1NoteId: string | null;
+  nocInstanceId?: number | null;
   processed?: boolean;
 }
 

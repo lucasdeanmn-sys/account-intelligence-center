@@ -313,6 +313,60 @@ export async function searchProducts(name: string): Promise<any[]> {
 
 // ─── MSI Renewal helpers ──────────────────────────────────────────────────────
 
+// Batch-fetch noc_instance_id (Customer Number) from the company associated with each deal.
+// Returns a Map<dealId, instanceId | null>.
+export async function getDealCompanyNocIds(
+  dealIds: string[]
+): Promise<Map<string, number | null>> {
+  const result = new Map<string, number | null>();
+  if (!dealIds.length) return result;
+
+  // Step 1: Fetch the first company association for each deal (10 at a time)
+  const dealCompanyMap = new Map<string, string>(); // dealId → companyId
+  const BATCH = 10;
+  for (let i = 0; i < dealIds.length; i += BATCH) {
+    const batch = dealIds.slice(i, i + BATCH);
+    await Promise.all(
+      batch.map(async (dealId) => {
+        const assoc = await hs(
+          "GET",
+          `/crm/v4/objects/deals/${dealId}/associations/companies`
+        ).catch(() => ({ results: [] }));
+        const firstId = (assoc.results ?? [])[0]?.toObjectId;
+        if (firstId) dealCompanyMap.set(dealId, String(firstId));
+      })
+    );
+  }
+
+  // Step 2: Batch-read noc_instance_id from all unique companies
+  const uniqueCompanyIds = Array.from(new Set(Array.from(dealCompanyMap.values())));
+  if (uniqueCompanyIds.length) {
+    const batchRes = await hs("POST", "/crm/v3/objects/companies/batch/read", {
+      inputs: uniqueCompanyIds.map((id) => ({ id })),
+      properties: ["noc_instance_id"],
+    }).catch(() => ({ results: [] }));
+
+    const companyNocMap = new Map<string, number | null>();
+    for (const co of batchRes.results ?? []) {
+      const raw = co.properties?.noc_instance_id;
+      const n = raw ? parseInt(raw, 10) : NaN;
+      companyNocMap.set(String(co.id), isNaN(n) ? null : n);
+    }
+
+    // Step 3: Map deal → noc_instance_id
+    for (const [dealId, companyId] of Array.from(dealCompanyMap.entries())) {
+      result.set(dealId, companyNocMap.get(companyId) ?? null);
+    }
+  }
+
+  // Deals with no associated company
+  for (const dealId of dealIds) {
+    if (!result.has(dealId)) result.set(dealId, null);
+  }
+
+  return result;
+}
+
 export async function getMsiDealsByStartDate(
   isoDate: string,
   pipelineId?: string
