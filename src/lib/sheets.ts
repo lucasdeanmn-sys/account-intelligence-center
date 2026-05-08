@@ -12,20 +12,6 @@ async function sheetsGet(path: string): Promise<any> {
   return res.json();
 }
 
-async function sheetsPost(path: string, body: unknown): Promise<any> {
-  const token = await getGoogleToken();
-  const res = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`Sheets POST error ${res.status}: ${await res.text()}`);
-  return res.json();
-}
-
 async function sheetsPut(path: string, body: unknown): Promise<any> {
   const token = await getGoogleToken();
   const res = await fetch(`${BASE}${path}`, {
@@ -49,78 +35,61 @@ export interface RenewalSheetRow {
   notes?: string;
 }
 
-// Appends a row to the correct month section in the MSI Renewal/Term Worksheet.
-// Finds the "# Month YYYY" header and appends after existing rows in that section.
-// Creates a new section at the bottom if the month doesn't exist yet.
+// Sheet column layout (1-indexed):
+//   A=empty prefix, B=Company, C=Renewal License, D=Current License,
+//   E=Domo (CSA), F=Domo Rounded, G=Agreement, H=Extensions
+
+// Updates the matching company row in the month tab (e.g. "May 2026").
+// Writes renewalCount → Renewal License (C) and Agreement (G),
+// csaCount → Domo (E), csaRounded → Domo Rounded (F),
+// currentLicense → Current License (D).
+// If the company is not found in the tab, appends a new row at the bottom.
 export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow): Promise<void> {
-  // Read column A to locate the month section
-  const data = await sheetsGet(
-    `/spreadsheets/${SHEET_ID}/values/Sheet1!A:A`
+  const tab = `'${monthLabel}'`;
+
+  // Read columns A:B to locate the company row
+  const colData = await sheetsGet(
+    `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A:B")}`
   );
-  const colA: string[][] = data.values ?? [];
+  const colAB: string[][] = colData.values ?? [];
 
-  const normalizedTarget = `# ${monthLabel}`.toLowerCase().replace(/\s+/g, " ").trim();
-  let sectionStart = -1;
-  let sectionEnd = colA.length; // default: end of sheet
-
-  for (let i = 0; i < colA.length; i++) {
-    const cell = (colA[i]?.[0] ?? "").toLowerCase().replace(/\s+/g, " ").trim();
-    if (cell === normalizedTarget) {
-      sectionStart = i;
-    } else if (sectionStart > -1 && i > sectionStart + 1 && cell.startsWith("# ")) {
-      sectionEnd = i;
+  const needle = row.company.trim().toLowerCase();
+  let matchRow = -1; // 0-based index into colAB
+  for (let i = 0; i < colAB.length; i++) {
+    if ((colAB[i]?.[1] ?? "").trim().toLowerCase() === needle) {
+      matchRow = i;
       break;
     }
   }
 
-  const newRow = [
-    row.company,
+  // C–G values: Renewal License, Current License, Domo, Domo Rounded, Agreement
+  const updateValues = [
+    row.renewalCount,
     row.currentLicense ?? "",
     row.csaCount ?? "",
     row.csaRounded ?? "",
     row.renewalCount,
-    row.notes ?? "",
   ];
 
-  if (sectionStart === -1) {
-    // Month section doesn't exist — append a new section at the bottom
-    const lastRow = colA.length + 1;
-    const headerRange = `Sheet1!A${lastRow + 1}`;
-    const dataRange = `Sheet1!A${lastRow + 3}`;
-
+  if (matchRow !== -1) {
+    // Company exists — update columns C–G on that row
+    const rowNum = matchRow + 1; // 1-indexed
+    const range = encodeURIComponent(`${tab}!C${rowNum}:G${rowNum}`);
     await sheetsPut(
-      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(headerRange)}?valueInputOption=USER_ENTERED`,
-      { values: [[`# ${monthLabel}`]] }
-    );
-    await sheetsPut(
-      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(dataRange)}?valueInputOption=USER_ENTERED`,
-      { values: [["Company", "Current License", "CSA", "CSA Rounded", "Agreement", "Notes"]] }
-    );
-    const rowRange = `Sheet1!A${lastRow + 4}`;
-    await sheetsPut(
-      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(rowRange)}?valueInputOption=USER_ENTERED`,
-      { values: [newRow] }
+      `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
+      { values: [updateValues] }
     );
   } else {
-    // Month section exists — find the first empty row within it
-    const fullData = await sheetsGet(
-      `/spreadsheets/${SHEET_ID}/values/Sheet1!A${sectionStart + 1}:F${sectionEnd}`
+    // Company not found — append a new row after the last content row
+    const allData = await sheetsGet(
+      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A:G")}`
     );
-    const sectionRows: any[][] = fullData.values ?? [];
-    // Find last non-empty row in section
-    let insertOffset = sectionRows.length;
-    for (let i = sectionRows.length - 1; i >= 0; i--) {
-      const hasContent = sectionRows[i]?.some((c: any) => c !== "");
-      if (hasContent) {
-        insertOffset = i + 1;
-        break;
-      }
-    }
-    const insertRow = sectionStart + 1 + insertOffset + 1; // 1-based
-    const rowRange = `Sheet1!A${insertRow}:F${insertRow}`;
+    const allRows: any[][] = allData.values ?? [];
+    const newRowNum = allRows.length + 1;
+    const range = encodeURIComponent(`${tab}!A${newRowNum}:G${newRowNum}`);
     await sheetsPut(
-      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(rowRange)}?valueInputOption=USER_ENTERED`,
-      { values: [newRow] }
+      `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
+      { values: [["", row.company, ...updateValues]] }
     );
   }
 }
