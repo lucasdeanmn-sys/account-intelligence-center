@@ -117,6 +117,10 @@ export interface RenewalEntry {
   m1NoteHtml: string | null;
   m1NoteId: string | null;
   nocInstanceId?: number | null;
+  /** CSA instance name for this company (used as the sheet row matching key). */
+  csaInstanceName?: string | null;
+  /** Human-readable note to write to the sheet Notes column. */
+  sheetNote?: string | null;
   processed?: boolean;
 }
 

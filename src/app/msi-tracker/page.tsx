@@ -587,7 +587,7 @@ export default function MSITrackerPage() {
         } else {
           renewalCount = Math.max(csaRounded, d.currentYearLicense ?? 0);
         }
-        return { ...d, csaCount, csaRounded, renewalCount };
+        return { ...d, csaCount, csaRounded, renewalCount, csaInstanceName: instanceName };
       })
     );
   }
@@ -669,6 +669,8 @@ export default function MSITrackerPage() {
         m1NoteHtml: entry.m1NoteHtml,
         nextMsiYear: entry.nextMsiYear,
         hasExtension: entry.hasExtension,
+        csaInstanceName: entry.csaInstanceName ?? null,
+        sheetNote: entry.sheetNote ?? null,
       }),
     });
     const data = await res.json();

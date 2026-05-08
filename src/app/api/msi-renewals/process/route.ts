@@ -40,6 +40,8 @@ export async function POST(req: NextRequest) {
       m1NoteHtml,
       nextMsiYear,
       hasExtension,
+      csaInstanceName,
+      sheetNote,
     } = await req.json();
 
     if (!currentDealId || !renewalDealName || !renewalCount || !expirationDate) {
@@ -162,11 +164,13 @@ export async function POST(req: NextRequest) {
       });
       await appendRenewalRow(monthLabel, {
         company,
+        instanceName: csaInstanceName ?? null,
         currentLicense: orderFormLicense ?? currentYearLicense ?? null,
         csaCount: csaCount ?? null,
         csaRounded: csaRounded ?? null,
         renewalCount,
         isAutoRenew: !orderFormLicense,
+        sheetNote: sheetNote ?? null,
       }).catch((e) => console.warn("Sheet write failed (non-fatal):", e.message));
     }
 

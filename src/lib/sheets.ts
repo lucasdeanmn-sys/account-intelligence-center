@@ -28,54 +28,75 @@ async function sheetsPut(path: string, body: unknown): Promise<any> {
 
 export interface RenewalSheetRow {
   company: string;
+  /** CSA instance name — used as the primary row-matching key when present.
+   *  Falls back to `company` (HubSpot deal name) when null. */
+  instanceName?: string | null;
   currentLicense: number | null;
   csaCount: number | null;
   csaRounded: number | null;
   renewalCount: number;
   isAutoRenew?: boolean;
-  notes?: string;
+  /** Text for the Notes column (column I). */
+  sheetNote?: string | null;
 }
 
-// Sheet column layout (1-indexed):
+// Sheet column layout (row 2 = header, data starts row 3):
 //   A=empty prefix, B=Company, C=Renewal License, D=Current License,
-//   E=Domo (CSA), F=Domo Rounded, G=Agreement, H=Extensions
+//   E=Domo (CSA), F=Domo Rounded, G=Agreement, H=Extensions, I=Notes
+
+// Returns true when two company name strings refer to the same company, handling
+// minor variations like trailing plural 's' and "(Auto-renew)" suffixes.
+function companiesMatch(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s.toLowerCase().trim().replace(/\s*\(auto-renew\)\s*$/i, "");
+  const na = norm(a);
+  const nb = norm(b);
+  if (na === nb) return true;
+  // Singular/plural: "Communication" vs "Communications"
+  if (na + "s" === nb || nb + "s" === na) return true;
+  return false;
+}
 
 // Updates the matching company row in the month tab (e.g. "May 2026").
-// Writes renewalCount → Renewal License (C) and Agreement (G),
-// csaCount → Domo (E), csaRounded → Domo Rounded (F),
-// currentLicense → Current License (D).
-// If the company is not found in the tab, appends a new row at the bottom.
+// Matching priority:
+//   1. CSA instance name (row.instanceName) — canonical sheet name
+//   2. HubSpot company name (row.company) — fallback
+// If no row is found, appends a new row at the bottom.
 export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow): Promise<void> {
   const tab = `'${monthLabel}'`;
 
-  // Display name written to column B: auto-renew deals get an "(Auto-renew)" suffix.
-  const displayName = row.isAutoRenew
-    ? `${row.company.trim()} (Auto-renew)`
-    : row.company.trim();
+  // Display name written to column B: prefer the CSA instance name so the sheet
+  // keeps its canonical names; fall back to HubSpot company name.
+  // Auto-renew deals get an "(Auto-renew)" suffix.
+  const baseName = (row.instanceName?.trim() || row.company.trim());
+  const displayName = row.isAutoRenew ? `${baseName} (Auto-renew)` : baseName;
 
-  // Read columns A:B to locate the company row.
-  // Use A1:B to ensure row indices match the 1-based sheet row numbers exactly.
+  // Read columns A1:B to locate the company row (index 0 = sheet row 1).
   const colData = await sheetsGet(
     `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A1:B")}`
   );
   const colAB: string[][] = colData.values ?? [];
 
-  // Strip any "(Auto-renew)" suffix when matching so both new and existing rows
-  // resolve to the same company regardless of whether the suffix was written.
-  const needle = row.company.trim().toLowerCase();
-  let matchRow = -1; // 0-based index into colAB (index 0 = row 1 in the sheet)
+  // Try CSA instance name first, then fall back to HubSpot company name.
+  const instanceNeedle = row.instanceName?.trim() ?? null;
+  const companyNeedle = row.company.trim();
+  let matchRow = -1; // 0-based index into colAB (index 0 = sheet row 1)
+
   for (let i = 0; i < colAB.length; i++) {
-    const cellB = (colAB[i]?.[1] ?? "")
-      .replace(/\s*\(auto-renew\)\s*$/i, "")
-      .trim()
-      .toLowerCase();
-    if (cellB === needle) {
+    const cellB = colAB[i]?.[1] ?? "";
+    // Instance name wins outright
+    if (instanceNeedle && companiesMatch(cellB, instanceNeedle)) {
       matchRow = i;
       break;
     }
+    // HubSpot company name is a fallback — keep searching in case instance name appears later
+    if (matchRow === -1 && companiesMatch(cellB, companyNeedle)) {
+      matchRow = i;
+    }
   }
 
-  // B–G values: Company (display), Renewal License, Current License, Domo, Domo Rounded, Agreement
+  // B–I values: Company, Renewal License, Current License, Domo, Domo Rounded,
+  //             Agreement, Extensions (blank), Notes
   const updateValues = [
     displayName,
     row.renewalCount,
@@ -83,12 +104,14 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
     row.csaCount ?? "",
     row.csaRounded ?? "",
     row.renewalCount,
+    "",                      // H: Extensions — leave as-is (manually managed)
+    row.sheetNote ?? "",     // I: Notes
   ];
 
   if (matchRow !== -1) {
-    // Company exists — update columns B–G on that row (index 0 = row 1)
-    const rowNum = matchRow + 1; // 1-indexed
-    const range = encodeURIComponent(`${tab}!B${rowNum}:G${rowNum}`);
+    // Company exists — update columns B–I on that row
+    const rowNum = matchRow + 1; // convert 0-based index to 1-based sheet row
+    const range = encodeURIComponent(`${tab}!B${rowNum}:I${rowNum}`);
     await sheetsPut(
       `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
       { values: [updateValues] }
@@ -96,11 +119,11 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
   } else {
     // Company not found — append a new row after the last content row
     const allData = await sheetsGet(
-      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A:G")}`
+      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A:I")}`
     );
     const allRows: any[][] = allData.values ?? [];
     const newRowNum = allRows.length + 1;
-    const range = encodeURIComponent(`${tab}!A${newRowNum}:G${newRowNum}`);
+    const range = encodeURIComponent(`${tab}!A${newRowNum}:I${newRowNum}`);
     await sheetsPut(
       `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
       { values: [["", ...updateValues]] }

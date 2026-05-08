@@ -43,6 +43,27 @@ interface M1Parsed {
   currentYearLicense: number | null;
   m1NoteHtml: string | null;
   m1NoteId: string | null;
+  /** All MSI year numbers found in the note (italic + non-italic), sorted asc. */
+  allYearsInNote: number[];
+}
+
+// Derive a human-readable sheet note from the parsed M1 data.
+// Auto-renew deals get "Auto-renewal"; order form deals get "Year X of Y on existing M1 agreement"
+// where X/Y reflect the position within the consecutive year sequence in the note.
+function computeSheetNote(
+  orderFormLicense: number | null,
+  nextMsiYear: number | null,
+  allYearsInNote: number[]
+): string {
+  if (!orderFormLicense || !nextMsiYear) return "Auto-renewal";
+  const yearSet = new Set(allYearsInNote);
+  // Walk back to find the start of the consecutive block containing nextMsiYear
+  let blockStart = nextMsiYear;
+  while (yearSet.has(blockStart - 1)) blockStart--;
+  const blockLen = allYearsInNote.filter((y) => y >= blockStart && y <= nextMsiYear).length;
+  const pos = nextMsiYear - blockStart + 1;
+  if (blockLen <= 1) return `Year ${pos} on existing M1 agreement`;
+  return `Year ${pos} of ${blockLen} on existing M1 agreement`;
 }
 
 function parseM1Note(
@@ -171,6 +192,11 @@ function parseM1Note(
     }
   }
 
+  // Collect all year numbers found in the note (used for sheetNote generation)
+  const allYearsInNote = Array.from(
+    new Set([...italicEntries.keys(), ...nonItalicEntries.keys()])
+  ).sort((a, b) => a - b);
+
   // Return effective year values so extensions show year context in the UI
   return {
     dealId,
@@ -180,6 +206,7 @@ function parseM1Note(
     currentYearLicense,
     m1NoteHtml: html,
     m1NoteId,
+    allYearsInNote,
   };
 }
 
@@ -290,6 +317,16 @@ export async function GET(req: NextRequest) {
     // CSA id → circuits map (empty if CSA fetch failed)
     const csaIdMap: Map<number, number> = csaResult?.idMap ?? new Map();
 
+    // Build a map from CSA instance ID → instance name so we can write the
+    // canonical sheet name (e.g. "BEC Communication") rather than the HubSpot
+    // deal name (e.g. "Bartlett Electric Cooperative").
+    const instanceNameByIdMap = new Map<number, string>();
+    for (const inst of csaResult?.allInstances ?? []) {
+      if (inst.instanceId !== null) {
+        instanceNameByIdMap.set(inst.instanceId, inst.instanceName);
+      }
+    }
+
     // Build enriched entries
     const entries: RenewalEntry[] = filtered.map((deal: any) => {
       const company = extractCompany(deal.properties?.dealname ?? "");
@@ -301,18 +338,21 @@ export async function GET(req: NextRequest) {
         currentYearLicense: null,
         m1NoteHtml: null,
         m1NoteId: null,
+        allYearsInNote: [] as number[],
       };
       const msiYear = parsed.msiYear ?? extractYearFromName(deal.properties?.dealname ?? "");
       const nextMsiYear = msiYear ? msiYear + 1 : null;
       const orderFormLicense: number | null = parsed.orderFormLicense ?? null;
       const currentYearLicense: number | null = parsed.currentYearLicense ?? null;
 
-      // ID-based CSA match: noc_instance_id → CSA circuits
+      // ID-based CSA match: noc_instance_id → CSA circuits + instance name
       const nocInstanceId = nocIdMap.get(deal.id) ?? null;
       const csaCount: number | null =
         nocInstanceId != null ? (csaIdMap.get(nocInstanceId) ?? null) : null;
       const csaRounded: number | null =
         csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
+      const csaInstanceName: string | null =
+        nocInstanceId != null ? (instanceNameByIdMap.get(nocInstanceId) ?? null) : null;
 
       // Order form always wins; auto-renew takes max(CSA rounded, current year)
       let renewalCount: number | null = null;
@@ -352,6 +392,8 @@ export async function GET(req: NextRequest) {
         m1NoteHtml: parsed.m1NoteHtml ?? null,
         m1NoteId: parsed.m1NoteId ?? null,
         nocInstanceId,
+        csaInstanceName,
+        sheetNote: computeSheetNote(orderFormLicense, nextMsiYear, parsed.allYearsInNote ?? []),
         processed,
       };
     });
