@@ -9,6 +9,9 @@ import {
   getExtensionDealForCompany,
   appendAutoRenewalEntry,
   createLineItem,
+  getDealCustomFields,
+  getDealCompanyId,
+  associateDealWithCompany,
 } from "@/lib/hubspot";
 import { appendRenewalRow } from "@/lib/sheets";
 import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
@@ -44,8 +47,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Resolve the pipeline stage ("Closed Won - Ready for Billing")
-    const stage = await getClosedWonStage("renewal").catch(() => null);
+    // 1. Resolve the pipeline stage ("Closed Won - Ready for Billing") and fetch
+    //    current deal's custom fields + company association in parallel.
+    const [stage, currentCustomFields, currentCompanyId] = await Promise.all([
+      getClosedWonStage("renewal").catch(() => null),
+      getDealCustomFields(currentDealId).catch(() => ({})),
+      getDealCompanyId(currentDealId).catch(() => null),
+    ]);
 
     // 2. Create or identify the renewal deal
     let renewalDealId = existingRenewalDealId as string | null;
@@ -57,10 +65,18 @@ export async function POST(req: NextRequest) {
         renewalStartDate,
         HUBSPOT_OWNER_ID,
         stage?.pipelineId,
-        stage?.stageId
+        stage?.stageId,
+        currentCustomFields as Record<string, string>
       );
       renewalDealId = newDeal.id;
       action = "created";
+
+      // Associate the new deal with the same company as the current deal
+      if (currentCompanyId) {
+        await associateDealWithCompany(renewalDealId, currentCompanyId).catch((e) => {
+          console.warn("Company association failed (non-fatal):", e.message);
+        });
+      }
     }
 
     // 3. Set the renewal deal to Closed Won - Ready for Billing, update dates

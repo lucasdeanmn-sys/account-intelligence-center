@@ -397,7 +397,7 @@ export async function getDealLineItems(dealId: string): Promise<any[]> {
   if (!ids.length) return [];
   const batch = await hs("POST", "/crm/v3/objects/line_items/batch/read", {
     inputs: ids.map((id) => ({ id })),
-    properties: ["name", "quantity", "price", "amount", "hs_product_id"],
+    properties: ["name", "quantity", "price", "amount", "hs_product_id", "recurringbillingfrequency"],
   }).catch(() => ({ results: [] }));
   return batch.results ?? [];
 }
@@ -464,16 +464,62 @@ export async function createMsiRenewalDeal(
   subscriptionStartDate: string,
   ownerId: string,
   pipelineId?: string,
-  stageId?: string
+  stageId?: string,
+  extraProperties?: Record<string, string>
 ) {
   const properties: Record<string, string> = {
     dealname: name,
     hubspot_owner_id: ownerId,
     subscription_start_date: new Date(subscriptionStartDate + "T00:00:00.000Z").getTime().toString(),
+    ...extraProperties,
   };
   if (pipelineId) properties.pipeline = pipelineId;
   if (stageId) properties.dealstage = stageId;
   return hs("POST", "/crm/v3/objects/deals", { properties });
+}
+
+// Fetch select custom fields from a deal (for copying to the renewal deal)
+const COPYABLE_DEAL_FIELDS = [
+  "channel_rep",
+  "channel_partner",
+  "lead_source",
+  "type_of_billing",
+  "subscription_term",
+  "of_subs_license_",
+  "deal_currency_code",
+] as const;
+
+export async function getDealCustomFields(
+  dealId: string
+): Promise<Partial<Record<(typeof COPYABLE_DEAL_FIELDS)[number], string>>> {
+  const res = await hs(
+    "GET",
+    `/crm/v3/objects/deals/${dealId}?properties=${COPYABLE_DEAL_FIELDS.join(",")}`
+  );
+  const raw = res.properties ?? {};
+  const out: Record<string, string> = {};
+  for (const f of COPYABLE_DEAL_FIELDS) {
+    if (raw[f] != null && raw[f] !== "") out[f] = String(raw[f]);
+  }
+  return out;
+}
+
+// Returns the first company ID associated with a deal, or null.
+export async function getDealCompanyId(dealId: string): Promise<string | null> {
+  const assoc = await hs(
+    "GET",
+    `/crm/v4/objects/deals/${dealId}/associations/companies`
+  ).catch(() => ({ results: [] }));
+  const first = (assoc.results ?? [])[0];
+  return first ? String(first.toObjectId) : null;
+}
+
+// Associate a deal with a company (default association).
+export async function associateDealWithCompany(
+  dealId: string,
+  companyId: string
+): Promise<void> {
+  await associate("deals", dealId, "companies", companyId);
 }
 
 export async function createLineItem(
@@ -482,7 +528,8 @@ export async function createLineItem(
   quantity: number,
   unitPrice: string | null,
   description: string | null,
-  productId: string | null
+  productId: string | null,
+  recurringBillingFrequency?: string | null
 ) {
   const properties: Record<string, string> = {
     name,
@@ -491,6 +538,7 @@ export async function createLineItem(
   if (unitPrice) properties.price = unitPrice;
   if (description) properties.description = description;
   if (productId) properties.hs_product_id = productId;
+  if (recurringBillingFrequency) properties.recurringbillingfrequency = recurringBillingFrequency;
   const item = await hs("POST", "/crm/v3/objects/line_items", { properties });
   await associate("line_items", item.id, "deals", dealId);
   return item;
@@ -514,7 +562,8 @@ export async function cloneLineItemsToDeal(
       qty,
       item.properties?.price ?? null,
       null,
-      item.properties?.hs_product_id ?? null
+      item.properties?.hs_product_id ?? null,
+      item.properties?.recurringbillingfrequency ?? null
     );
   }
 }
