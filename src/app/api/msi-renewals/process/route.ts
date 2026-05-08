@@ -12,6 +12,8 @@ import {
   getDealCustomFields,
   getDealCompanyId,
   associateDealWithCompany,
+  updateDealMrr,
+  associateNoteWithDeal,
 } from "@/lib/hubspot";
 import { appendRenewalRow } from "@/lib/sheets";
 import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
@@ -124,6 +126,20 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // 4c. Recalculate deal amount (MRR = annual total / 12) from the final line items.
+    //     Catalog products auto-populate price, so we read them back here.
+    await updateDealMrr(renewalDealId!).catch((e) => {
+      console.warn("MRR update failed (non-fatal):", e.message);
+    });
+
+    // 4d. Associate the M1 Order Form note with the renewal deal so it's visible
+    //     in HubSpot without navigating back to the original deal.
+    if (m1NoteId) {
+      await associateNoteWithDeal(m1NoteId, renewalDealId!).catch((e) => {
+        console.warn("Note association failed (non-fatal):", e.message);
+      });
+    }
+
     // 5. For auto-renew deals (no order form), mark the new year in the M1 note
     //    as invoiced by appending/italicizing "MSI Year N - X,XXX".
     if (!orderFormLicense && m1NoteId && m1NoteHtml && nextMsiYear && renewalCount) {
@@ -150,6 +166,7 @@ export async function POST(req: NextRequest) {
         csaCount: csaCount ?? null,
         csaRounded: csaRounded ?? null,
         renewalCount,
+        isAutoRenew: !orderFormLicense,
       }).catch((e) => console.warn("Sheet write failed (non-fatal):", e.message));
     }
 

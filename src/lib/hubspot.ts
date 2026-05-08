@@ -684,3 +684,27 @@ export async function appendAutoRenewalEntry(
   const newLine = `<p><em>MSI Year ${nextMsiYear} - ${formatted}</em></p>`;
   await updateNoteBody(noteId, html.trimEnd() + "\n" + newLine);
 }
+
+// Sum all line items on a deal and write the annual MRR (total / 12) to `amount`.
+// Uses the catalog price when available; falls back to the stored price property.
+export async function updateDealMrr(dealId: string): Promise<void> {
+  const items = await getDealLineItems(dealId).catch(() => []);
+  let totalAnnual = 0;
+  for (const item of items) {
+    const price = parseFloat(item.properties?.price ?? "0");
+    const qty = parseInt(item.properties?.quantity ?? "1", 10);
+    if (price > 0 && qty > 0) totalAnnual += price * qty;
+  }
+  if (totalAnnual > 0) {
+    const mrr = (totalAnnual / 12).toFixed(2);
+    await updateDealProperties(dealId, { amount: mrr });
+  }
+}
+
+// Associate a note with a deal (e.g. link the M1 Order Form note to the renewal deal).
+export async function associateNoteWithDeal(
+  noteId: string,
+  dealId: string
+): Promise<void> {
+  await associate("notes", noteId, "deals", dealId);
+}

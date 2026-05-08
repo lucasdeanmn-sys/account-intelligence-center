@@ -32,6 +32,7 @@ export interface RenewalSheetRow {
   csaCount: number | null;
   csaRounded: number | null;
   renewalCount: number;
+  isAutoRenew?: boolean;
   notes?: string;
 }
 
@@ -47,23 +48,36 @@ export interface RenewalSheetRow {
 export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow): Promise<void> {
   const tab = `'${monthLabel}'`;
 
-  // Read columns A:B to locate the company row
+  // Display name written to column B: auto-renew deals get an "(Auto-renew)" suffix.
+  const displayName = row.isAutoRenew
+    ? `${row.company.trim()} (Auto-renew)`
+    : row.company.trim();
+
+  // Read columns A:B to locate the company row.
+  // Use A1:B to ensure row indices match the 1-based sheet row numbers exactly.
   const colData = await sheetsGet(
-    `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A:B")}`
+    `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A1:B")}`
   );
   const colAB: string[][] = colData.values ?? [];
 
+  // Strip any "(Auto-renew)" suffix when matching so both new and existing rows
+  // resolve to the same company regardless of whether the suffix was written.
   const needle = row.company.trim().toLowerCase();
-  let matchRow = -1; // 0-based index into colAB
+  let matchRow = -1; // 0-based index into colAB (index 0 = row 1 in the sheet)
   for (let i = 0; i < colAB.length; i++) {
-    if ((colAB[i]?.[1] ?? "").trim().toLowerCase() === needle) {
+    const cellB = (colAB[i]?.[1] ?? "")
+      .replace(/\s*\(auto-renew\)\s*$/i, "")
+      .trim()
+      .toLowerCase();
+    if (cellB === needle) {
       matchRow = i;
       break;
     }
   }
 
-  // C–G values: Renewal License, Current License, Domo, Domo Rounded, Agreement
+  // B–G values: Company (display), Renewal License, Current License, Domo, Domo Rounded, Agreement
   const updateValues = [
+    displayName,
     row.renewalCount,
     row.currentLicense ?? "",
     row.csaCount ?? "",
@@ -72,9 +86,9 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
   ];
 
   if (matchRow !== -1) {
-    // Company exists — update columns C–G on that row
+    // Company exists — update columns B–G on that row (index 0 = row 1)
     const rowNum = matchRow + 1; // 1-indexed
-    const range = encodeURIComponent(`${tab}!C${rowNum}:G${rowNum}`);
+    const range = encodeURIComponent(`${tab}!B${rowNum}:G${rowNum}`);
     await sheetsPut(
       `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
       { values: [updateValues] }
@@ -89,7 +103,7 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
     const range = encodeURIComponent(`${tab}!A${newRowNum}:G${newRowNum}`);
     await sheetsPut(
       `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
-      { values: [["", row.company, ...updateValues]] }
+      { values: [["", ...updateValues]] }
     );
   }
 }
