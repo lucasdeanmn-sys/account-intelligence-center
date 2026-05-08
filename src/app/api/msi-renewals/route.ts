@@ -4,7 +4,7 @@ import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
 
-export const maxDuration = 60;
+export const maxDuration = 90;
 export const dynamic = "force-dynamic";
 
 function extractCompany(dealName: string): string {
@@ -173,7 +173,7 @@ function parseM1Note(
 
 async function fetchNotesBatched(deals: any[]): Promise<{ dealId: string; notes: any[] }[]> {
   const results: { dealId: string; notes: any[] }[] = [];
-  const BATCH = 5;
+  const BATCH = 15;
   for (let i = 0; i < deals.length; i += BATCH) {
     const batch = deals.slice(i, i + BATCH);
     const batchResults = await Promise.all(

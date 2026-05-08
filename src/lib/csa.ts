@@ -4,7 +4,13 @@
  * Shared CSA MCP client.  Called by both the standalone CSA API route
  * (POST /api/msi-renewals/csa) and the main renewals route so circuit
  * counts arrive in the initial report load — no separate fetch step needed.
+ *
+ * NOTE: The SSE connection uses Node's native `https` module rather than the
+ * global `fetch`, because Next.js patches `global.fetch` for caching/dedup
+ * and its wrapper buffers the response before resolving — which hangs
+ * indefinitely on an SSE stream that never sends a terminal chunk.
  */
+import * as https from "node:https";
 
 const CSA_SSE_URL =
   "https://computed-success-analysis-mcp-production.up.railway.app/sse";
@@ -29,92 +35,176 @@ interface CsaRecord {
 
 // ─── MCP SSE helper ───────────────────────────────────────────────────────────
 
+// Wraps the actual SSE call with a hard timeout so a stalled Railway connection
+// never blocks the request handler indefinitely.
 export async function callMcp(
   toolName: string,
-  args: Record<string, unknown> = {}
+  args: Record<string, unknown> = {},
+  timeoutMs = 12_000
+): Promise<any> {
+  const timer = new Promise<never>((_, reject) => {
+    const t = setTimeout(
+      () => reject(new Error(`callMcp(${toolName}) timed out after ${timeoutMs}ms`)),
+      timeoutMs
+    );
+    // Allow process to exit even if this timer is still pending
+    if (typeof (t as any).unref === "function") (t as any).unref();
+  });
+  return Promise.race([_callMcpInner(toolName, args), timer]);
+}
+
+/**
+ * Open an SSE connection to the CSA MCP server and return an async function
+ * that reads the next event of a given type.
+ *
+ * Uses node:https directly to bypass Next.js's global.fetch patch, which
+ * buffers the full response before resolving and therefore hangs indefinitely
+ * on a streaming SSE response.
+ */
+function openSseStream(
+  url: string,
+  headers: Record<string, string>
+): {
+  nextEvent: (type: string) => Promise<string>;
+  destroy: () => void;
+} {
+  const parsed = new URL(url);
+
+  // Simple FIFO queue — resolved promises for already-arrived events,
+  // or pending resolve/reject for callers waiting on the next event.
+  type QueueEntry = { type: string; data: string };
+  const arrived: QueueEntry[] = [];
+  let waiter: { type: string; resolve: (s: string) => void; reject: (e: Error) => void } | null = null;
+  let streamError: Error | null = null;
+
+  function emit(type: string, data: string) {
+    if (waiter && waiter.type === type) {
+      const w = waiter; waiter = null;
+      w.resolve(data);
+    } else {
+      arrived.push({ type, data });
+    }
+  }
+  function emitError(err: Error) {
+    streamError = err;
+    if (waiter) { const w = waiter; waiter = null; w.reject(err); }
+  }
+
+  function nextEvent(type: string): Promise<string> {
+    // If we already have this event buffered, return it immediately
+    const idx = arrived.findIndex((e) => e.type === type);
+    if (idx !== -1) {
+      const [entry] = arrived.splice(idx, 1);
+      return Promise.resolve(entry.data);
+    }
+    if (streamError) return Promise.reject(streamError);
+    return new Promise((resolve, reject) => {
+      waiter = { type, resolve, reject };
+    });
+  }
+
+  // SSE parser state
+  let buf = "", evType = "", evData = "";
+  function processChunk(chunk: string) {
+    buf += chunk;
+    while (true) {
+      const nl = buf.indexOf("\n");
+      if (nl === -1) break;
+      const line = buf.slice(0, nl).replace(/\r$/, "");
+      buf = buf.slice(nl + 1);
+      if (line === "") {
+        if (evType && evData) emit(evType, evData);
+        evType = ""; evData = "";
+      } else if (line.startsWith("event:")) {
+        evType = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        evData += (evData ? "\n" : "") + line.slice(5).trim();
+      }
+    }
+  }
+
+  const req = https.request(
+    {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: "GET",
+      headers: { Accept: "text/event-stream", "Cache-Control": "no-cache", ...headers },
+    },
+    (res) => {
+      if ((res.statusCode ?? 0) >= 400) {
+        emitError(new Error(`CSA SSE connect failed: ${res.statusCode}`));
+        res.resume();
+        return;
+      }
+      res.setEncoding("utf8");
+      res.on("data", processChunk);
+      res.on("end", () => emitError(new Error("CSA SSE stream ended unexpectedly")));
+      res.on("error", emitError);
+    }
+  );
+  req.on("error", emitError);
+  req.end();
+
+  return { nextEvent, destroy: () => req.destroy() };
+}
+
+async function _callMcpInner(
+  toolName: string,
+  args: Record<string, unknown>
 ): Promise<any> {
   const apiKey = process.env.CSA_API_KEY;
   const authHeaders: Record<string, string> = apiKey
     ? { Authorization: `Bearer ${apiKey}` }
     : {};
 
-  const sseRes = await fetch(CSA_SSE_URL, {
-    headers: { Accept: "text/event-stream", "Cache-Control": "no-cache", ...authHeaders },
-  });
-  if (!sseRes.ok || !sseRes.body) {
-    throw new Error(`CSA SSE connect failed: ${sseRes.status}`);
-  }
+  const { nextEvent, destroy } = openSseStream(CSA_SSE_URL, authHeaders);
 
-  const reader = sseRes.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "", evType = "", evData = "";
+  try {
+    const messagesPath = await nextEvent("endpoint");
+    const messagesUrl = messagesPath.startsWith("http")
+      ? messagesPath
+      : `${CSA_BASE}${messagesPath}`;
 
-  async function nextEvent(targetType: string): Promise<string> {
-    while (true) {
-      while (true) {
-        const nl = buf.indexOf("\n");
-        if (nl === -1) break;
-        const line = buf.slice(0, nl).replace(/\r$/, "");
-        buf = buf.slice(nl + 1);
-        if (line === "") {
-          if (evType === targetType && evData) {
-            const payload = evData;
-            evType = "";
-            evData = "";
-            return payload;
-          }
-          evType = "";
-          evData = "";
-        } else if (line.startsWith("event:")) {
-          evType = line.slice(6).trim();
-        } else if (line.startsWith("data:")) {
-          evData += (evData ? "\n" : "") + line.slice(5).trim();
-        }
-      }
-      const { done, value } = await reader.read();
-      if (done) throw new Error(`CSA SSE stream ended before '${targetType}' event`);
-      buf += decoder.decode(value, { stream: true });
+    // POST the JSON-RPC request.  fetch is fine here — it's a short-lived POST
+    // that returns immediately with status 202; the result comes back on the
+    // SSE stream, not as the POST response body.
+    const postRes = await fetch(messagesUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "1",
+        method: "tools/call",
+        params: { name: toolName, arguments: args },
+      }),
+    });
+    if (!postRes.ok) {
+      throw new Error(
+        `CSA RPC POST ${postRes.status}: ${(await postRes.text().catch(() => "")).slice(0, 200)}`
+      );
     }
+
+    const rawMsg = await nextEvent("message");
+
+    const rpc = JSON.parse(rawMsg);
+    if (rpc.error) throw new Error(`CSA RPC error: ${JSON.stringify(rpc.error)}`);
+
+    const content = rpc?.result?.content;
+    const text: string = Array.isArray(content)
+      ? (content[0]?.text ?? "")
+      : String(rpc?.result ?? "");
+    return JSON.parse(text);
+  } finally {
+    destroy();
   }
-
-  const messagesPath = await nextEvent("endpoint");
-  const messagesUrl = messagesPath.startsWith("http")
-    ? messagesPath
-    : `${CSA_BASE}${messagesPath}`;
-
-  const postRes = await fetch(messagesUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: "1",
-      method: "tools/call",
-      params: { name: toolName, arguments: args },
-    }),
-  });
-  if (!postRes.ok) {
-    throw new Error(
-      `CSA RPC POST ${postRes.status}: ${(await postRes.text().catch(() => "")).slice(0, 200)}`
-    );
-  }
-
-  const rawMsg = await nextEvent("message");
-  reader.cancel().catch(() => {});
-
-  const rpc = JSON.parse(rawMsg);
-  if (rpc.error) throw new Error(`CSA RPC error: ${JSON.stringify(rpc.error)}`);
-
-  const content = rpc?.result?.content;
-  const text: string = Array.isArray(content)
-    ? (content[0]?.text ?? "")
-    : String(rpc?.result ?? "");
-  return JSON.parse(text);
 }
 
 // ─── Snapshot fetch ───────────────────────────────────────────────────────────
 
 async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: CsaInstance[] }> {
-  const parsed = await callMcp("get_snapshot", {});
+  // get_snapshot returns all companies — it's a large payload; allow up to 30s.
+  const parsed = await callMcp("get_snapshot", {}, 30_000);
 
   // Snapshot returns { snapshot_date, total_returned, filters, companies: [...] }
   const raw: any[] = Array.isArray(parsed)
@@ -199,50 +289,46 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
     return { idMap, records, instances: [], allInstances };
   }
 
-  // Call get_company for each target instance — cap at 10 parallel at a time
-  // to avoid overwhelming the MCP server with simultaneous SSE connections.
-  const BATCH = 10;
+  // Fire all get_company calls in a single parallel batch — each has its own
+  // 12-second timeout so a stalled connection doesn't block the others.
+  const results = await Promise.allSettled(
+    targets.map((r) => callMcp("get_company", { name: r.instance }, 12_000))
+  );
+
   const resolvedInstances: CsaInstance[] = [];
 
-  for (let i = 0; i < targets.length; i += BATCH) {
-    const batch = targets.slice(i, i + BATCH);
-    const results = await Promise.allSettled(
-      batch.map((r) => callMcp("get_company", { name: r.instance }))
-    );
+  for (let j = 0; j < targets.length; j++) {
+    const target = targets[j];
+    const res = results[j];
+    let instanceId: number | null = null;
+    let circuits = target.circuits;
 
-    for (let j = 0; j < batch.length; j++) {
-      const target = batch[j];
-      const res = results[j];
-      let instanceId: number | null = null;
-      let circuits = target.circuits;
+    if (res.status === "fulfilled" && res.value) {
+      // get_company returns { companies: [{ instance_id, instance_name, circuits, ... }] }
+      const companies: any[] = res.value?.companies ?? [];
+      const match =
+        companies.find(
+          (c: any) =>
+            typeof c.instance_id === "number" &&
+            (
+              (c.instance_name ?? "").toLowerCase() === target.instance.toLowerCase() ||
+              (c.instance ?? "").toLowerCase() === target.instance.toLowerCase()
+            )
+        ) ?? companies[0];
 
-      if (res.status === "fulfilled" && res.value) {
-        // get_company returns { companies: [{ instance_id, instance_name, circuits, ... }] }
-        const companies: any[] = res.value?.companies ?? [];
-        const match =
-          companies.find(
-            (c: any) =>
-              typeof c.instance_id === "number" &&
-              (
-                (c.instance_name ?? "").toLowerCase() === target.instance.toLowerCase() ||
-                (c.instance ?? "").toLowerCase() === target.instance.toLowerCase()
-              )
-          ) ?? companies[0];
-
-        if (match?.instance_id != null) {
-          instanceId = match.instance_id as number;
-          circuits = (match.circuits as number) ?? circuits;
-          idMap.set(instanceId, circuits);
-        }
+      if (match?.instance_id != null) {
+        instanceId = match.instance_id as number;
+        circuits = (match.circuits as number) ?? circuits;
+        idMap.set(instanceId, circuits);
       }
-
-      resolvedInstances.push({
-        instanceId,
-        instanceName: target.instance,
-        circuits,
-        domain: target.domain,
-      });
     }
+
+    resolvedInstances.push({
+      instanceId,
+      instanceName: target.instance,
+      circuits,
+      domain: target.domain,
+    });
   }
 
   // Merge: resolved instances first, then the rest (unresolved) for the full picker list
