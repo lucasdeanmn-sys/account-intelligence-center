@@ -95,7 +95,7 @@ function parseM1Note(
     );
   });
   if (!m1Notes.length) {
-    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null };
+    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [] };
   }
 
   // Pick the best note:
