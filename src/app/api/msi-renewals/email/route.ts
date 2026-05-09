@@ -24,24 +24,17 @@ export async function POST(req: NextRequest) {
 
     const renewals = [...deals].sort((a, b) => a.company.localeCompare(b.company));
 
-    const formatLine = (d: RenewalEntry) => {
+    const formatLine = (d: RenewalEntry): string => {
       const count = d.renewalCount?.toLocaleString() ?? "TBD";
-      const orderForm = d.orderFormLicense?.toLocaleString();
-      // Show order-form qty in parens when CSA count is higher
-      const countSuffix =
-        d.renewalCount !== null &&
-        d.orderFormLicense !== null &&
-        d.renewalCount > d.orderFormLicense
-          ? ` (${orderForm})`
-          : "";
-      // Extension names, e.g. "POM & Fiber Clarity"
-      const extPart =
-        d.extensionNames?.length
-          ? ` — ${d.extensionNames.join(" & ")}`
-          : "";
-      // Sheet note, e.g. "Year 3 of 3 on existing M1 agreement" or "Auto-renewal"
-      const notePart = d.sheetNote ? ` — ${d.sheetNote}` : "";
-      return `${d.company} - ${count}${countSuffix}${extPart}${notePart}`;
+      // Shorten "Year X of Y on existing M1 agreement" → "Year X of Y"
+      const note = d.sheetNote
+        ? d.sheetNote.replace(/\s+on existing M1 agreement$/i, "")
+        : null;
+      const notePart = note ? ` (${note})` : "";
+      const mainLine = `• ${d.company} — ${count}${notePart}`;
+      // Extensions as indented sub-bullets
+      const extLines = (d.extensionNames ?? []).map((e) => `  • ${e}`);
+      return [mainLine, ...extLines].join("\n");
     };
 
     const subject = `MSI ${monthLabel} Renewal`;
