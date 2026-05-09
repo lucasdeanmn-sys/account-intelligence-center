@@ -61,16 +61,23 @@ export interface RenewalSheetRow {
 //   A=empty prefix, B=Company, C=Renewal License, D=Current License,
 //   E=Domo (CSA), F=Domo Rounded, G=Agreement, H=Extensions, I=Notes
 
-// Returns true when two company name strings refer to the same company, handling
-// minor variations like trailing plural 's' and "(Auto-renew)" suffixes.
+// Returns true when two company name strings refer to the same company.
+// Handles: exact match, singular/plural, "(Auto-renew)" suffix, legal suffixes
+// like ", LLC" / ", Inc" / ", Co", and substring containment so that
+// "Fiber Connect" matches "Fiber Connect, LLC" and vice-versa.
 function companiesMatch(a: string, b: string): boolean {
   const norm = (s: string) =>
-    s.toLowerCase().trim().replace(/\s*\(auto-renew\)\s*$/i, "");
+    s.toLowerCase().trim()
+      .replace(/\s*\(auto-renew\)\s*$/i, "")
+      .replace(/[,.]?\s*(llc|inc|co|corp|ltd)\.?\s*$/i, "")
+      .trim();
   const na = norm(a);
   const nb = norm(b);
   if (na === nb) return true;
   // Singular/plural: "Communication" vs "Communications"
   if (na + "s" === nb || nb + "s" === na) return true;
+  // Substring containment: "Fiber Connect" ↔ "Fiber Connect, LLC"
+  if (na.includes(nb) || nb.includes(na)) return true;
   return false;
 }
 
