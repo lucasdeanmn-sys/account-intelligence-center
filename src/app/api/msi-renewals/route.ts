@@ -339,7 +339,7 @@ export async function GET(req: NextRequest) {
     // Skip extension deals — they share the company name but belong to a separate pipeline.
     // closeDate map is used as a Tier 0 fallback for companies whose subscription_start_date
     // is set to a non-standard day (e.g. June 19 instead of June 1).
-    function buildDealMap(deals: any[]): Map<string, any> {
+    const buildDealMap = (deals: any[]): Map<string, any> => {
       const map = new Map<string, any>();
       for (const d of deals) {
         if (/extension/i.test(d.properties?.dealname ?? "")) continue;
@@ -348,7 +348,7 @@ export async function GET(req: NextRequest) {
         if (co && !map.has(co.toLowerCase())) map.set(co.toLowerCase(), d);
       }
       return map;
-    }
+    };
     const startDateMap = buildDealMap(startDateDeals);
     // Exclude future-year deals from the closeDate pool — only keep deals whose
     // subscription_start_date is before the renewal month (i.e. the current-year deal).
