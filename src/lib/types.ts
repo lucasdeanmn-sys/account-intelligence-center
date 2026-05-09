@@ -121,7 +121,14 @@ export interface RenewalEntry {
   csaInstanceName?: string | null;
   /** Human-readable note to write to the sheet Notes column. */
   sheetNote?: string | null;
+  /** Extension product names active for this company, e.g. ["POM", "Fiber Clarity"]. */
+  extensionNames?: string[];
   processed?: boolean;
+  cancelled?: boolean;
+  /** True when this company's CSA data spans multiple records sharing the same
+   *  instance ID (e.g. a sub-tenant). The displayed circuit count is already the
+   *  sum, but the entry is flagged so you can double-check the breakdown. */
+  multiTenant?: boolean;
 }
 
 export interface TaskCreate {

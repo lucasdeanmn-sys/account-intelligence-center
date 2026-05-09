@@ -273,6 +273,9 @@ export interface CsaMonthData {
   records: CsaRecord[];
   instances: CsaInstance[];    // target-month instances (IDs resolved)
   allInstances: CsaInstance[]; // all instances (for picker / override UI)
+  /** Instance IDs that have more than one CSA record (e.g. a sub-tenant).
+   *  Used to surface a "Multi-tenant" warning tag in the UI. */
+  multiTenantIds: Set<number>;
 }
 
 export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonthData> {
@@ -284,9 +287,10 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
   );
 
   const idMap = new Map<number, number>();
+  const multiTenantIds = new Set<number>();
 
   if (!targets.length) {
-    return { idMap, records, instances: [], allInstances };
+    return { idMap, records, instances: [], allInstances, multiTenantIds };
   }
 
   // Fire all get_company calls in a single parallel batch — each has its own
@@ -318,8 +322,17 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
 
       if (match?.instance_id != null) {
         instanceId = match.instance_id as number;
-        circuits = (match.circuits as number) ?? circuits;
-        idMap.set(instanceId, circuits);
+        // Use target.circuits (from the snapshot) rather than match.circuits (from
+        // get_company). The snapshot already has correct per-company circuit counts
+        // when multiple companies share an instance_id (e.g. Great Plains + GPC East).
+        // get_company may return the same "first match" record for different snapshot
+        // targets that share an instance name, giving a wrong/doubled count.
+        // circuits stays as target.circuits (set at the top of this iteration).
+        //
+        // Accumulate: sum circuits across all snapshot records sharing the same
+        // instance_id so the total reflects all companies on that MSI instance.
+        if (idMap.has(instanceId)) multiTenantIds.add(instanceId);
+        idMap.set(instanceId, (idMap.get(instanceId) ?? 0) + circuits);
       }
     }
 
@@ -342,5 +355,6 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
     records,
     instances: resolvedInstances,
     allInstances: [...resolvedInstances, ...unresolvedInstances],
+    multiTenantIds,
   };
 }

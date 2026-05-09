@@ -12,6 +12,20 @@ async function sheetsGet(path: string): Promise<any> {
   return res.json();
 }
 
+async function sheetsPost(path: string, body: unknown): Promise<any> {
+  const token = await getGoogleToken();
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Sheets POST error ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
 async function sheetsPut(path: string, body: unknown): Promise<any> {
   const token = await getGoogleToken();
   const res = await fetch(`${BASE}${path}`, {
@@ -36,6 +50,9 @@ export interface RenewalSheetRow {
   csaRounded: number | null;
   renewalCount: number;
   isAutoRenew?: boolean;
+  /** Comma-separated list of active extension names, e.g. "POM, Fiber Clarity".
+   *  Written to column H (Extensions). */
+  extensions?: string | null;
   /** Text for the Notes column (column I). */
   sheetNote?: string | null;
 }
@@ -67,9 +84,7 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
 
   // Display name written to column B: prefer the CSA instance name so the sheet
   // keeps its canonical names; fall back to HubSpot company name.
-  // Auto-renew deals get an "(Auto-renew)" suffix.
-  const baseName = (row.instanceName?.trim() || row.company.trim());
-  const displayName = row.isAutoRenew ? `${baseName} (Auto-renew)` : baseName;
+  const displayName = (row.instanceName?.trim() || row.company.trim());
 
   // Read columns A1:B to locate the company row (index 0 = sheet row 1).
   const colData = await sheetsGet(
@@ -96,7 +111,7 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
   }
 
   // B–I values: Company, Renewal License, Current License, Domo, Domo Rounded,
-  //             Agreement, Extensions (blank), Notes
+  //             Agreement, Extensions, Notes
   const updateValues = [
     displayName,
     row.renewalCount,
@@ -104,7 +119,7 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
     row.csaCount ?? "",
     row.csaRounded ?? "",
     row.renewalCount,
-    "",                      // H: Extensions — leave as-is (manually managed)
+    row.extensions ?? "",    // H: Extensions (e.g. "POM, Fiber Clarity")
     row.sheetNote ?? "",     // I: Notes
   ];
 
@@ -129,4 +144,63 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
       { values: [["", ...updateValues]] }
     );
   }
+}
+
+// Highlights the matching company row red on the month tab to indicate cancellation.
+// Uses the same row-matching logic as appendRenewalRow.
+export async function cancelRenewalRow(
+  monthLabel: string,
+  company: string,
+  instanceName?: string | null
+): Promise<void> {
+  const tab = `'${monthLabel}'`;
+
+  // 1. Find the row
+  const colData = await sheetsGet(
+    `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A1:B")}`
+  );
+  const colAB: string[][] = colData.values ?? [];
+
+  const instanceNeedle = instanceName?.trim() ?? null;
+  const companyNeedle = company.trim();
+  let matchRow = -1;
+
+  for (let i = 0; i < colAB.length; i++) {
+    const cellB = colAB[i]?.[1] ?? "";
+    if (instanceNeedle && companiesMatch(cellB, instanceNeedle)) { matchRow = i; break; }
+    if (matchRow === -1 && companiesMatch(cellB, companyNeedle)) matchRow = i;
+  }
+
+  if (matchRow === -1) return; // row not in sheet yet — nothing to highlight
+
+  // 2. Get the numeric sheetId for this tab
+  const meta = await sheetsGet(
+    `/spreadsheets/${SHEET_ID}?fields=sheets.properties`
+  );
+  const sheet = (meta.sheets ?? []).find(
+    (s: any) => s.properties?.title === monthLabel
+  );
+  if (!sheet) return;
+  const sheetId: number = sheet.properties.sheetId;
+
+  // 3. Color the entire row light red
+  await sheetsPost(`/spreadsheets/${SHEET_ID}:batchUpdate`, {
+    requests: [
+      {
+        repeatCell: {
+          range: {
+            sheetId,
+            startRowIndex: matchRow,
+            endRowIndex: matchRow + 1,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 1.0, green: 0.8, blue: 0.8 },
+            },
+          },
+          fields: "userEnteredFormat.backgroundColor",
+        },
+      },
+    ],
+  });
 }
