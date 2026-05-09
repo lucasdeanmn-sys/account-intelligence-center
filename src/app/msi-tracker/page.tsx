@@ -232,7 +232,11 @@ function EmailModal({ subject, body, to, deals, onClose }: EmailModalProps) {
     }
   }
 
-  const mailto = `mailto:${to.join(",")}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const gmailUrl =
+    `https://mail.google.com/mail/?view=cm&fs=1` +
+    `&to=${encodeURIComponent(to.join(","))}` +
+    `&su=${encodeURIComponent(subject)}` +
+    `&body=${encodeURIComponent(body)}`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "rgba(0,0,0,0.7)" }}>
@@ -285,12 +289,82 @@ function EmailModal({ subject, body, to, deals, onClose }: EmailModalProps) {
             {italicizing ? "Updating…" : "Update M1 Notes"}
           </button>
           <a
-            href={mailto}
+            href={gmailUrl}
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex-1 py-2 rounded-lg text-sm font-medium text-center transition-colors"
             style={{ backgroundColor: "#6366f1", color: "white" }}
           >
-            Open in Mail
+            Open in Gmail
           </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Cancel Modal ─────────────────────────────────────────────────────────────
+
+interface CancelModalProps {
+  entry: RenewalEntry;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}
+
+function CancelModal({ entry, onClose, onConfirm }: CancelModalProps) {
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleConfirm() {
+    setProcessing(true);
+    setError(null);
+    try {
+      await onConfirm();
+    } catch (e: any) {
+      setError(e.message ?? "Something went wrong");
+      setProcessing(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "rgba(0,0,0,0.7)" }}>
+      <div className="w-full max-w-md rounded-2xl border shadow-2xl" style={{ backgroundColor: "#1a1d27", borderColor: "#252836" }}>
+        <div className="flex items-center justify-between p-5 border-b" style={{ borderColor: "#252836" }}>
+          <div>
+            <h2 className="text-base font-semibold text-white">Mark as Did Not Renew</h2>
+            <p className="text-xs mt-0.5" style={{ color: "#64748b" }}>{entry.company}</p>
+          </div>
+          <button onClick={onClose} style={{ color: "#64748b" }} className="hover:text-white transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="p-5 space-y-3">
+          <p className="text-sm" style={{ color: "#94a3b8" }}>This will:</p>
+          <ul className="text-sm space-y-1.5" style={{ color: "#64748b" }}>
+            <li className="flex items-start gap-2"><span style={{ color: "#ef4444" }}>•</span> Prepend <strong className="text-white">"Did not renew"</strong> to the top of the M1 note in HubSpot</li>
+            <li className="flex items-start gap-2"><span style={{ color: "#ef4444" }}>•</span> Highlight the row red on the Google Sheet</li>
+            <li className="flex items-start gap-2"><span style={{ color: "#ef4444" }}>•</span> Exclude this account from the renewal email</li>
+          </ul>
+          {error && (
+            <p className="text-xs mt-2" style={{ color: "#ef4444" }}>{error}</p>
+          )}
+        </div>
+        <div className="flex gap-3 p-5 border-t" style={{ borderColor: "#252836" }}>
+          <button
+            onClick={onClose}
+            className="flex-1 py-2 rounded-lg text-sm font-medium border transition-colors"
+            style={{ borderColor: "#252836", color: "#94a3b8" }}
+          >
+            Go Back
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={processing}
+            className="flex-1 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+            style={{ backgroundColor: "#ef444420", color: "#ef4444", border: "1px solid #ef444430" }}
+          >
+            {processing ? "Marking…" : "Confirm — Did Not Renew"}
+          </button>
         </div>
       </div>
     </div>
@@ -302,9 +376,10 @@ function EmailModal({ subject, body, to, deals, onClose }: EmailModalProps) {
 interface DealRowProps {
   entry: RenewalEntry;
   onProcess: (entry: RenewalEntry) => void;
+  onCancel: (entry: RenewalEntry) => void;
 }
 
-function DealRow({ entry, onProcess }: DealRowProps) {
+function DealRow({ entry, onProcess, onCancel }: DealRowProps) {
   const [showNote, setShowNote] = useState(false);
 
   const renewalHigher =
@@ -313,7 +388,7 @@ function DealRow({ entry, onProcess }: DealRowProps) {
     entry.renewalCount > entry.orderFormLicense;
 
   return (
-    <div className="rounded-xl border" style={{ backgroundColor: "#1a1d27", borderColor: entry.processed ? "#22c55e30" : "#252836" }}>
+    <div className="rounded-xl border" style={{ backgroundColor: entry.cancelled ? "#ef444408" : "#1a1d27", borderColor: entry.cancelled ? "#ef444430" : entry.processed ? "#22c55e30" : "#252836" }}>
       <div className="flex items-center gap-4 p-4">
         {/* Company */}
         <div className="flex-1 min-w-0">
@@ -323,6 +398,12 @@ function DealRow({ entry, onProcess }: DealRowProps) {
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f59e0b15", color: "#f59e0b" }}
                 title="This company has an active prorated extension deal in HubSpot">
                 Has Extension
+              </span>
+            )}
+            {entry.multiTenant && (
+              <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f9731615", color: "#fb923c" }}
+                title="Multiple CSA records share this instance ID — CSA count is the sum. Verify the individual tenant counts before processing.">
+                Multi-tenant
               </span>
             )}
             {entry.orderFormLicense === null && entry.currentYearLicense !== null && (
@@ -361,9 +442,7 @@ function DealRow({ entry, onProcess }: DealRowProps) {
           </div>
           <div className="text-right w-28">
             <p className="text-sm font-bold" style={{ color: renewalHigher ? "#f59e0b" : "#a5b4fc" }}>
-              {entry.renewalCount !== null
-                ? `${entry.renewalCount.toLocaleString()}${renewalHigher && entry.orderFormLicense ? ` (${entry.orderFormLicense.toLocaleString()})` : ""}`
-                : "—"}
+              {entry.renewalCount?.toLocaleString() ?? "—"}
             </p>
           </div>
         </div>
@@ -380,19 +459,38 @@ function DealRow({ entry, onProcess }: DealRowProps) {
               {showNote ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
             </button>
           )}
-          {entry.processed ? (
-            <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium" style={{ backgroundColor: "#22c55e20", color: "#22c55e" }}>
-              <CheckCircle size={12} />
-              Processed
+          {entry.cancelled ? (
+            <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium" style={{ backgroundColor: "#ef444420", color: "#ef4444" }}>
+              <X size={12} />
+              Cancelled
             </span>
-          ) : (
+          ) : entry.processed ? (
             <button
               onClick={() => onProcess(entry)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-              style={{ backgroundColor: "#6366f120", color: "#a5b4fc", border: "1px solid #6366f140" }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-opacity hover:opacity-70"
+              style={{ backgroundColor: "#22c55e20", color: "#22c55e" }}
+              title="Re-process (safe to repeat)"
             >
-              Process
+              <CheckCircle size={12} />
+              Processed
             </button>
+          ) : (
+            <>
+              <button
+                onClick={() => onCancel(entry)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                style={{ backgroundColor: "#ef444415", color: "#ef4444", border: "1px solid #ef444430" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => onProcess(entry)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                style={{ backgroundColor: "#6366f120", color: "#a5b4fc", border: "1px solid #6366f140" }}
+              >
+                Process
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -556,6 +654,8 @@ export default function MSITrackerPage() {
   const [renewalStartDate, setRenewalStartDate] = useState("");
 
   const [confirmEntry, setConfirmEntry] = useState<RenewalEntry | null>(null);
+  const [cancelEntry, setCancelEntry] = useState<RenewalEntry | null>(null);
+  const [sheetWarning, setSheetWarning] = useState<string | null>(null);
   const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[] } | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
   const [csaInstances, setCsaInstances] = useState<CsaInstance[]>([]);
@@ -683,7 +783,36 @@ export default function MSITrackerPage() {
           : d
       )
     );
+
+    if (data.sheetWriteError) {
+      setSheetWarning(
+        `Sheet write failed for ${entry.company}: ${data.sheetWriteError}. Re-process to retry.`
+      );
+    }
+
     setConfirmEntry(null);
+  }
+
+  async function handleCancel(entry: RenewalEntry) {
+    const res = await fetch("/api/msi-renewals/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        m1NoteId: entry.m1NoteId,
+        m1NoteHtml: entry.m1NoteHtml,
+        company: entry.company,
+        expirationDate: entry.expirationDate,
+        csaInstanceName: entry.csaInstanceName ?? null,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Cancel failed");
+    setDeals((prev) =>
+      prev.map((d) =>
+        d.currentDealId === entry.currentDealId ? { ...d, cancelled: true } : d
+      )
+    );
+    setCancelEntry(null);
   }
 
   async function generateEmail() {
@@ -697,7 +826,10 @@ export default function MSITrackerPage() {
       const res = await fetch("/api/msi-renewals/email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ deals, monthLabel: label }),
+        body: JSON.stringify({
+          deals: deals.filter((d) => d.processed && !d.cancelled),
+          monthLabel: label,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -780,6 +912,22 @@ export default function MSITrackerPage() {
         </div>
       )}
 
+      {/* Sheet write warning */}
+      {sheetWarning && (
+        <div
+          className="flex items-center justify-between gap-3 p-4 rounded-xl mb-4 border"
+          style={{ backgroundColor: "#f59e0b15", borderColor: "#f59e0b30", color: "#f59e0b" }}
+        >
+          <div className="flex items-center gap-3">
+            <AlertCircle size={16} className="shrink-0" />
+            <p className="text-sm">{sheetWarning}</p>
+          </div>
+          <button onClick={() => setSheetWarning(null)} className="shrink-0 hover:opacity-70 transition-opacity">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {/* Summary bar */}
       {deals.length > 0 && (
         <div className="flex items-center justify-between mb-4">
@@ -842,6 +990,7 @@ export default function MSITrackerPage() {
             key={entry.currentDealId}
             entry={entry}
             onProcess={(e) => setConfirmEntry(e)}
+            onCancel={(e) => setCancelEntry(e)}
           />
         ))}
       </div>
@@ -874,6 +1023,15 @@ export default function MSITrackerPage() {
           entry={confirmEntry}
           onCancel={() => setConfirmEntry(null)}
           onConfirm={() => handleProcess(confirmEntry)}
+        />
+      )}
+
+      {/* Cancel confirmation modal */}
+      {cancelEntry && (
+        <CancelModal
+          entry={cancelEntry}
+          onClose={() => setCancelEntry(null)}
+          onConfirm={() => handleCancel(cancelEntry)}
         />
       )}
 

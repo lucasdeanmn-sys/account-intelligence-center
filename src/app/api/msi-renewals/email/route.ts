@@ -22,20 +22,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "deals array required" }, { status: 400 });
     }
 
-    const sorted = [...deals].sort((a, b) => a.company.localeCompare(b.company));
-    const renewals = sorted; // extension deals are no longer included in the list at all
-    const extensions = sorted.filter((d) => d.hasExtension);
+    const renewals = [...deals].sort((a, b) => a.company.localeCompare(b.company));
 
     const formatLine = (d: RenewalEntry) => {
       const count = d.renewalCount?.toLocaleString() ?? "TBD";
       const orderForm = d.orderFormLicense?.toLocaleString();
-      const suffix =
+      // Show order-form qty in parens when CSA count is higher
+      const countSuffix =
         d.renewalCount !== null &&
         d.orderFormLicense !== null &&
         d.renewalCount > d.orderFormLicense
           ? ` (${orderForm})`
           : "";
-      return `${d.company} - ${count}${suffix}`;
+      // Extension names, e.g. "POM & Fiber Clarity"
+      const extPart =
+        d.extensionNames?.length
+          ? ` — ${d.extensionNames.join(" & ")}`
+          : "";
+      // Sheet note, e.g. "Year 3 of 3 on existing M1 agreement" or "Auto-renewal"
+      const notePart = d.sheetNote ? ` — ${d.sheetNote}` : "";
+      return `${d.company} - ${count}${countSuffix}${extPart}${notePart}`;
     };
 
     const subject = `MSI ${monthLabel} Renewal`;
@@ -46,24 +52,12 @@ export async function POST(req: NextRequest) {
       `Please see the ${monthLabel} MSI renewal list below. Licenses have been updated in NOC360 accordingly.`,
       ``,
       ...renewals.map(formatLine),
-    ];
-
-    if (extensions.length) {
-      bodyParts.push(
-        ``,
-        `The following accounts have MSI Extensions expiring this month:`,
-        ``,
-        ...extensions.map((d) => d.company)
-      );
-    }
-
-    bodyParts.push(
       ``,
       `Please let me know if you have any questions.`,
       ``,
       `Thanks,`,
-      `Luke`
-    );
+      `Luke`,
+    ];
 
     const body = bodyParts.join("\n");
 

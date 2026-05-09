@@ -6,7 +6,7 @@ import {
   updateDealProperties,
   getClosedWonStage,
   cloneLineItemsToDeal,
-  getExtensionDealForCompany,
+  getExtensionDealsForCompany,
   appendAutoRenewalEntry,
   createLineItem,
   getDealCustomFields,
@@ -108,23 +108,47 @@ export async function POST(req: NextRequest) {
       hadLineItems = true;
     }
 
-    // 4b. If the company has an active extension deal, also copy its line items
+    // 4b. If the company has active extension deals, copy all their line items
     //     onto the renewal deal so billing for the full term is in one place.
+    //     A company can have multiple extension deals (e.g. POM + FOM), so we
+    //     collect them all via getExtensionDealsForCompany.
+    //     We hoist extDeals so the names are available for the sheet write below.
+    //
+    //     Dedup guard: build a set of product IDs and names already on the renewal
+    //     deal so re-processing never creates duplicate extension line items.
+    let extDeals: Awaited<ReturnType<typeof getExtensionDealsForCompany>> = [];
     if (hasExtension && company) {
-      const ext = await getExtensionDealForCompany(company).catch(() => null);
-      if (ext?.lineItems?.length) {
-        await Promise.all(
-          ext.lineItems.map((item: any) =>
-            createLineItem(
-              renewalDealId!,
-              item.properties?.name ?? "MSI Extension",
-              parseInt(item.properties?.quantity ?? "1", 10),
-              item.properties?.price ?? null,
-              null,
-              item.properties?.hs_product_id ?? null
-            ).catch(() => null) // non-fatal
-          )
-        );
+      extDeals = await getExtensionDealsForCompany(company).catch(() => []);
+
+      // Re-read current renewal line items (may have been cloned in step 4)
+      const renewalLineItems = await getDealLineItems(renewalDealId!).catch(() => []);
+      const existingProductIds = new Set(
+        renewalLineItems.map((li: any) => li.properties?.hs_product_id).filter(Boolean)
+      );
+      const existingNames = new Set(
+        renewalLineItems.map((li: any) => (li.properties?.name ?? "").toLowerCase()).filter(Boolean)
+      );
+
+      for (const ext of extDeals) {
+        if (ext.lineItems?.length) {
+          await Promise.all(
+            ext.lineItems.map((item: any) => {
+              const productId = item.properties?.hs_product_id ?? null;
+              const itemName = (item.properties?.name ?? "").toLowerCase();
+              // Skip if the renewal deal already has this product or name
+              if (productId && existingProductIds.has(productId)) return Promise.resolve(null);
+              if (itemName && existingNames.has(itemName)) return Promise.resolve(null);
+              return createLineItem(
+                renewalDealId!,
+                item.properties?.name ?? "MSI Extension",
+                renewalCount,            // always match the renewal circuit count
+                item.properties?.price ?? null,
+                null,
+                productId
+              ).catch(() => null); // non-fatal
+            })
+          );
+        }
       }
     }
 
@@ -142,11 +166,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 5. For auto-renew deals (no order form), mark the new year in the M1 note
-    //    as invoiced by appending/italicizing "MSI Year N - X,XXX".
-    if (!orderFormLicense && m1NoteId && m1NoteHtml && nextMsiYear && renewalCount) {
+    // 5. Mark the new year in the M1 note as invoiced by italicizing/appending
+    //    "MSI Year N - X,XXX". Works for both order-form and auto-renew deals:
+    //    - Order-form: existing non-italic "Year N - X" entry is italicized in place.
+    //    - Auto-renew: new italic "Year N - X,XXX (Auto-renew)" bullet is appended.
+    if (m1NoteId && m1NoteHtml && nextMsiYear && renewalCount) {
       await appendAutoRenewalEntry(m1NoteId, m1NoteHtml, nextMsiYear, renewalCount).catch((e) => {
-        console.warn("M1 note auto-renew update failed (non-fatal):", e.message);
+        console.warn("M1 note update failed (non-fatal):", e.message);
       });
     }
 
@@ -155,13 +181,15 @@ export async function POST(req: NextRequest) {
       service_terminated: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
     });
 
-    // 7. Append to Google Sheet (best-effort)
+    // 7. Append to Google Sheet (best-effort — failure is non-fatal but surfaced in response)
+    let sheetWriteError: string | null = null;
     if (googleConfigured() && company) {
       const monthLabel = new Date(expirationDate + "T00:00:00.000Z").toLocaleString("en-US", {
         month: "long",
         year: "numeric",
         timeZone: "UTC",
       });
+      const extensionNames = extDeals.map((e) => e.extensionName).filter(Boolean);
       await appendRenewalRow(monthLabel, {
         company,
         instanceName: csaInstanceName ?? null,
@@ -170,8 +198,14 @@ export async function POST(req: NextRequest) {
         csaRounded: csaRounded ?? null,
         renewalCount,
         isAutoRenew: !orderFormLicense,
+        extensions: extensionNames.length ? extensionNames.join(", ") : null,
         sheetNote: sheetNote ?? null,
-      }).catch((e) => console.warn("Sheet write failed (non-fatal):", e.message));
+      }).catch((e) => {
+        console.warn("Sheet write failed (non-fatal):", e.message);
+        sheetWriteError = e.message ?? "Sheet write failed";
+      });
+    } else if (!googleConfigured()) {
+      sheetWriteError = "Google Sheets not configured";
     }
 
     return NextResponse.json({
@@ -179,6 +213,7 @@ export async function POST(req: NextRequest) {
       renewalDealId,
       action,
       hadLineItems,
+      sheetWriteError,
     });
   } catch (error: any) {
     console.error("MSI renewal process error:", error);
