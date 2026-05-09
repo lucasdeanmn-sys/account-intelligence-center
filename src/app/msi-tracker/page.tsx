@@ -21,6 +21,7 @@ interface CsaOverride {
   instanceName: string;
 }
 const CSA_OVERRIDES_KEY = "csaOverrides_v1";
+const cancelledKey = (expirationDate: string) => `msi_cancelled_${expirationDate}`;
 
 // ─── Confirmation Modal ───────────────────────────────────────────────────────
 
@@ -670,6 +671,21 @@ export default function MSITrackerPage() {
     localStorage.setItem(CSA_OVERRIDES_KEY, JSON.stringify(csaOverrides));
   }, [csaOverrides]);
 
+  // Persist cancelled deal IDs in localStorage keyed by expiration date
+  const [cancelledIds, setCancelledIds] = useState<Set<string>>(new Set());
+  function loadCancelledIds(expDate: string) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(cancelledKey(expDate)) ?? "[]");
+      return new Set<string>(stored);
+    } catch { return new Set<string>(); }
+  }
+  function persistCancelledId(expDate: string, dealId: string) {
+    const ids = loadCancelledIds(expDate);
+    ids.add(dealId);
+    localStorage.setItem(cancelledKey(expDate), JSON.stringify(Array.from(ids)));
+    setCancelledIds(new Set(ids));
+  }
+
   function applyOverride(company: string, instanceName: string) {
     const inst = csaInstances.find((i) => i.instanceName === instanceName);
     if (!inst) return;
@@ -741,7 +757,12 @@ export default function MSITrackerPage() {
         return { ...d, csaCount, csaRounded, renewalCount };
       });
 
-      setDeals(deals);
+      // Merge locally-persisted cancellations (covers deals with no M1 note to detect)
+      const storedCancelled = loadCancelledIds(data.expirationDate ?? "");
+      setCancelledIds(storedCancelled);
+      setDeals(deals.map((d) =>
+        storedCancelled.has(d.currentDealId) ? { ...d, cancelled: true } : d
+      ));
     } catch (e: any) {
       setError(e.message || "Failed to load renewal data");
     } finally {
@@ -807,6 +828,7 @@ export default function MSITrackerPage() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Cancel failed");
+    persistCancelledId(entry.expirationDate, entry.currentDealId);
     setDeals((prev) =>
       prev.map((d) =>
         d.currentDealId === entry.currentDealId ? { ...d, cancelled: true } : d

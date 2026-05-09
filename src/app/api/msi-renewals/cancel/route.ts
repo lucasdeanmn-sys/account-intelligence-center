@@ -13,8 +13,9 @@ export async function POST(req: NextRequest) {
     let noteError: string | null = null;
     let sheetError: string | null = null;
 
-    // 1. Prepend "Did not renew" to the top of the M1 note in HubSpot
-    if (m1NoteId && m1NoteHtml != null) {
+    // 1. Prepend "Did not renew" to the top of the M1 note in HubSpot.
+    // Guard against duplicates: skip if the note already contains the marker.
+    if (m1NoteId && m1NoteHtml != null && !m1NoteHtml.includes("Did not renew")) {
       const prepended =
         `<p><strong>Did not renew</strong></p>\n` + m1NoteHtml;
       await updateNoteBody(m1NoteId, prepended).catch((e) => {
