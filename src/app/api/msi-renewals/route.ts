@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByCloseMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
@@ -320,9 +320,13 @@ export async function GET(req: NextRequest) {
     const renewalStartMs = new Date(renewalStartDate + "T00:00:00.000Z").getTime();
     const renewalEndMs   = new Date(renewalStartDate + "T23:59:59.999Z").getTime();
 
-    const [startDateDeals, renewalDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
+    const [startDateDeals, renewalDeals, closeDateDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
       getMsiDealsByStartDate(startDate),
       getMsiDealsByStartDate(renewalStartDate),
+      // closeDate pool: catches deals whose subscription_start_date is off by a few
+      // weeks (e.g. Syntrio ssd = June 19 instead of June 1) but whose closedate
+      // correctly falls in the expiration month.
+      getMsiDealsByCloseMonth(expirationDate.substring(0, 7)).catch(() => [] as any[]),
       fetchCsaForMonth(expirationDate).catch((err: Error) => {
         console.error("CSA fetch error (non-fatal):", err.message);
         return null;
@@ -331,17 +335,31 @@ export async function GET(req: NextRequest) {
       getProcessedStageIds().catch(() => new Set<string>()),
     ]);
 
-    // Build a lookup map from extracted company name → deal for the startDateDeals pool.
-    // Skip extension deals — they share the company name but belong to a separate pipeline;
-    // including them here would block the CSA name-search fallback for companies like BEC.
-    const startDateMap = new Map<string, any>();
-    for (const d of startDateDeals) {
-      if (/extension/i.test(d.properties?.dealname ?? "")) continue;
-      const co = extractCompany(d.properties?.dealname ?? "");
-      if (co && !startDateMap.has(co.toLowerCase())) {
-        startDateMap.set(co.toLowerCase(), d);
+    // Build lookup maps from extracted company name → deal.
+    // Skip extension deals — they share the company name but belong to a separate pipeline.
+    // closeDate map is used as a Tier 0 fallback for companies whose subscription_start_date
+    // is set to a non-standard day (e.g. June 19 instead of June 1).
+    function buildDealMap(deals: any[]): Map<string, any> {
+      const map = new Map<string, any>();
+      for (const d of deals) {
+        if (/extension/i.test(d.properties?.dealname ?? "")) continue;
+        if (!/\bYear\b/i.test(d.properties?.dealname ?? "")) continue;
+        const co = extractCompany(d.properties?.dealname ?? "");
+        if (co && !map.has(co.toLowerCase())) map.set(co.toLowerCase(), d);
       }
+      return map;
     }
+    const startDateMap = buildDealMap(startDateDeals);
+    // Exclude future-year deals from the closeDate pool — only keep deals whose
+    // subscription_start_date is before the renewal month (i.e. the current-year deal).
+    // Using ssd < renewalStartMs rather than a single-day window because some companies
+    // have non-standard start days (e.g. June 19 instead of June 1).
+    const closeDateMap = buildDealMap(
+      closeDateDeals.filter((d: any) => {
+        const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
+        return ssd > 0 && ssd < renewalStartMs;
+      })
+    );
 
     const seenIds = new Set<string>();
     const currentDeals: any[] = [];
@@ -356,15 +374,22 @@ export async function GET(req: NextRequest) {
       const needFallback: typeof csaResult.instances = [];
 
       for (const inst of csaResult.instances) {
-        // Tier 1: subscription_start_date pool
+        // Tier 1a: subscription_start_date pool
+        // Tier 1b: closeDate pool (catches companies with non-standard ssd, e.g. June 19)
         let found: any = null;
+        let foundMethod = "startDate";
         for (const [co, deal] of Array.from(startDateMap.entries())) {
           if (companyNamesMatch(co, inst.instanceName)) { found = deal; break; }
+        }
+        if (!found) {
+          for (const [co, deal] of Array.from(closeDateMap.entries())) {
+            if (companyNamesMatch(co, inst.instanceName)) { found = deal; foundMethod = "closeDate"; break; }
+          }
         }
         if (found && !seenIds.has(found.id)) {
           seenIds.add(found.id);
           currentDeals.push(found);
-          _csaDebug.push({ instance: inst.instanceName, method: "startDate", dealName: found.properties?.dealname });
+          _csaDebug.push({ instance: inst.instanceName, method: foundMethod, dealName: found.properties?.dealname });
         } else if (!found) {
           needFallback.push(inst);
           _csaDebug.push({ instance: inst.instanceName, method: "pending" });
@@ -407,11 +432,10 @@ export async function GET(req: NextRequest) {
           });
           const nonRenewalCandidates = msiDeals.filter((d: any) => {
             const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
-            // Require a real start date (> 0) AND not in the upcoming renewal window.
-            // Deals with no start date (ssd=0) are treated as undated future deals and
-            // excluded here — they fall through to the msiDeals fallback only if no
-            // dated non-renewal deal exists (new Year-1 customers).
-            return ssd > 0 && !(ssd >= renewalStartMs && ssd <= renewalEndMs);
+            // Require a real start date AND starting before the renewal month.
+            // Using ssd < renewalStartMs (not a single-day window) so companies
+            // with non-standard start days (e.g. June 19 vs June 1) are handled.
+            return ssd > 0 && ssd < renewalStartMs;
           });
           const candidates = nonRenewalCandidates.length > 0 ? nonRenewalCandidates : msiDeals;
 
@@ -668,6 +692,14 @@ export async function GET(req: NextRequest) {
 
       const multiTenant = nocInstanceId != null && multiTenantIds.has(nocInstanceId);
 
+      // Detect cancellation: the cancel route prepends "Did not renew" to the M1 note.
+      // Check the raw notes (not just the parsed M1 note) so we catch it even when
+      // the note isn't the primary M1 note selected by parseM1Note.
+      const rawNotes = notesAndItems.find((n) => n.dealId === deal.id)?.notes ?? [];
+      const cancelled = rawNotes.some((n: any) =>
+        (n.properties?.hs_note_body ?? "").includes("Did not renew")
+      );
+
       return {
         currentDealId: deal.id,
         currentDealName: dealName,
@@ -691,6 +723,7 @@ export async function GET(req: NextRequest) {
         sheetNote: computeSheetNote(orderFormLicense, nextMsiYear, parsed.allYearsInNote ?? []),
         extensionNames,
         processed,
+        cancelled,
         multiTenant,
       };
     });
