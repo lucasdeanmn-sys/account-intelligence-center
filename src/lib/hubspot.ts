@@ -13,6 +13,10 @@ async function hs(method: string, path: string, body?: unknown): Promise<any> {
       Authorization: `Bearer ${token()}`,
       "Content-Type": "application/json",
     },
+    // Explicitly opt out of Next.js Data Cache so HubSpot responses are always
+    // fresh — force-dynamic on the route isn't reliably propagated to fetch calls
+    // in production builds of Next.js 14.
+    cache: "no-store",
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     signal: AbortSignal.timeout(15_000), // prevent indefinite hangs
   });
@@ -293,6 +297,50 @@ export async function searchProducts(name: string): Promise<any[]> {
 
 // ─── MSI Renewal helpers ──────────────────────────────────────────────────────
 
+const MSI_DEAL_PROPS = [
+  "dealname", "dealstage", "pipeline", "amount", "closedate",
+  "subscription_start_date", "hubspot_owner_id", "service_terminated",
+];
+
+/**
+ * Find all HubSpot deals associated with the company whose noc_instance_id
+ * matches the given CSA instanceId.  Returns raw deal objects (unfiltered).
+ *
+ * Flow: company search (noc_instance_id=id) → company→deal associations →
+ *       batch-read deal properties.
+ */
+export async function getMsiDealsByCompanyInstanceId(instanceId: number): Promise<any[]> {
+  // 1. Find companies with this noc_instance_id
+  const coRes = await hs("POST", "/crm/v3/objects/companies/search", {
+    filterGroups: [{ filters: [
+      { propertyName: "noc_instance_id", operator: "EQ", value: String(instanceId) },
+    ]}],
+    properties: ["name", "noc_instance_id"],
+    limit: 5,
+  }).catch(() => ({ results: [] }));
+  const companies: any[] = coRes.results ?? [];
+  if (!companies.length) return [];
+
+  // 2. Collect deal IDs from all matching companies
+  const dealIds = new Set<string>();
+  await Promise.all(companies.map(async (co) => {
+    const assoc = await hs("GET", `/crm/v4/objects/companies/${co.id}/associations/deals`)
+      .catch(() => ({ results: [] }));
+    for (const r of (assoc.results ?? [])) {
+      dealIds.add(String(r.toObjectId));
+    }
+  }));
+  if (!dealIds.size) return [];
+
+  // 3. Batch-read deal properties (cap at 50 to stay well within HubSpot limits)
+  const idList = Array.from(dealIds).slice(0, 50);
+  const batchRes = await hs("POST", "/crm/v3/objects/deals/batch/read", {
+    inputs: idList.map((id) => ({ id })),
+    properties: MSI_DEAL_PROPS,
+  }).catch(() => ({ results: [] }));
+  return batchRes.results ?? [];
+}
+
 // Batch-fetch noc_instance_id (Customer Number) from the company associated with each deal.
 // Returns a Map<dealId, instanceId | null>.
 export async function getDealCompanyNocIds(
@@ -349,7 +397,10 @@ export async function getDealCompanyNocIds(
 
 // Returns the set of company names (lowercase) that currently have an active
 // MSI extension deal — used to annotate renewal entries with hasExtension.
-export async function getActiveExtensionCompanies(): Promise<Set<string>> {
+/** Returns a map from lowercase company name → extension label(s), e.g.
+ *  "henderson municipal" → ["POM", "Fiber Clarity"]
+ */
+export async function getActiveExtensionCompanies(): Promise<Map<string, string[]>> {
   const deals = await searchDeals(
     [
       { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
@@ -359,13 +410,18 @@ export async function getActiveExtensionCompanies(): Promise<Set<string>> {
     200
   ).catch(() => []);
 
-  const companies = new Set<string>();
+  const companies = new Map<string, string[]>();
   for (const deal of deals) {
     // Skip if the extension term has already been terminated
     if (deal.properties?.service_terminated) continue;
     const name: string = deal.properties?.dealname ?? "";
     const idx = name.indexOf(" (MSI");
-    if (idx > 0) companies.add(name.slice(0, idx).trim().toLowerCase());
+    if (idx <= 0) continue;
+    const key = name.slice(0, idx).trim().toLowerCase();
+    const extName = extractExtensionName(name);
+    const existing = companies.get(key) ?? [];
+    if (!existing.includes(extName)) existing.push(extName);
+    companies.set(key, existing);
   }
   return companies;
 }
@@ -389,6 +445,86 @@ export async function getMsiDealsByStartDate(
     ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
     200
   );
+}
+
+/**
+ * Find MSI deals whose deal name contains a given company name fragment.
+ * Used as a CSA-driven fallback when a company appears in the CSA renewal
+ * snapshot but wasn't found by any date-based HubSpot search.
+ */
+// Generic telecom / business words that make poor HubSpot search tokens because
+// they appear in hundreds of deal names and produce noisy, irrelevant results.
+// When building the search token we skip these and fall back to shorter but more
+// distinctive words (e.g. "La Ward Telephone Co" → "Ward", not "Telephone").
+const GENERIC_TELECOM_TOKENS = new Set([
+  "communications", "communication", "telephone", "connect", "connected",
+  "broadband", "electric", "electrical", "cooperative", "coop", "telecom",
+  // NOTE: "fiber" is intentionally omitted — "Fiber Connect" needs "Fiber" as its
+  // search token because "Connect" is also generic and would produce worse results.
+  "networks", "network", "internet", "services", "service",
+  "company", "systems", "system", "co", "inc", "llc", "ltd", "corp",
+  "association", "authority", "rural", "mutual", "local",
+]);
+
+export async function searchMsiDealsByCompanyName(company: string): Promise<any[]> {
+  // Build a distinctive search token from the company name:
+  //   1. Split on whitespace, drop single-char tokens
+  //   2. Remove generic telecom/business terms (they return hundreds of unrelated deals)
+  //   3. If nothing remains after filtering, fall back to the full token list
+  //   4. Pick the longest token from the remaining pool
+  // Examples:
+  //   "La Ward Telephone Co"    → ["Ward"] → "Ward"
+  //   "Palo Communications"     → ["Palo"] → "Palo"
+  //   "Fiber Connect"           → ["Fiber"] → "Fiber"  ("Connect" is generic; "Fiber" is not in the set)
+  //   "BEC Communication"       → ["BEC"]  → "BEC"
+  //   "United Communications"   → ["United"] → "United"
+  const tokens = company.trim().split(/\s+/).filter((t) => t.length > 1);
+  const significant = tokens.filter((t) => !GENERIC_TELECOM_TOKENS.has(t.toLowerCase()));
+  const pool = significant.length > 0 ? significant : tokens;
+  const mainToken = pool.reduce((a, b) => (a.length >= b.length ? a : b), pool[0] ?? company);
+  return searchDeals(
+    [
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: mainToken },
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+    ],
+    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
+    20
+  );
+}
+
+/**
+ * Fallback: find MSI deals whose closedate falls within a calendar month.
+ * Used to catch deals whose subscription_start_date is set to the wrong date
+ * but whose closedate correctly reflects the expiration month.
+ *
+ * yearMonth: "2026-05"
+ */
+export async function getMsiDealsByCloseMonth(yearMonth: string): Promise<any[]> {
+  const [y, m] = yearMonth.split("-").map(Number);
+  const firstDay = new Date(`${yearMonth}-01T00:00:00.000Z`).getTime().toString();
+  // Last millisecond of the last day of the month
+  const lastDayDate = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
+  const lastDay = lastDayDate.getTime().toString();
+  return searchDeals(
+    [
+      { propertyName: "closedate", operator: "GTE", value: firstDay },
+      { propertyName: "closedate", operator: "LTE", value: lastDay },
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+    ],
+    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
+    200
+  );
+}
+
+/** Batch-fetch deals by ID using the direct object API (not search).
+ *  Unlike search, this returns current property values immediately — no index lag. */
+export async function getDealsByIds(dealIds: string[], properties: string[]): Promise<any[]> {
+  if (!dealIds.length) return [];
+  const res = await hs("POST", "/crm/v3/objects/deals/batch/read", {
+    inputs: dealIds.map((id) => ({ id })),
+    properties,
+  });
+  return res.results ?? [];
 }
 
 export async function getDealLineItems(dealId: string): Promise<any[]> {
@@ -562,22 +698,26 @@ export async function createLineItem(
   return item;
 }
 
-// Maps renewal circuit count to the correct MSI product catalog ID.
-// Tiers match the HubSpot product library (MSI 1k-2.5k, 2.5k-5k, …).
-const MSI_PRODUCT_TIERS: { max: number; id: string }[] = [
-  { max: 2_500,     id: "1618654015" }, // MSI (1k-2.5k)
-  { max: 5_000,     id: "1618656776" }, // MSI (2.5k-5k)
-  { max: 10_000,    id: "1618656777" }, // MSI (5k-10k)
-  { max: 50_000,    id: "1618654016" }, // MSI (10k-50k)
-  { max: 100_000,   id: "2086570789" }, // MSI (50k-100k)
-  { max: 500_000,   id: "2086400308" }, // MSI (100k-500k)
-  { max: 800_000,   id: "2086400312" }, // MSI (500k-800k)
-  { max: 2_000_000, id: "2086570803" }, // MSI (800k-2M)
-  { max: 4_000_000, id: "2086400317" }, // MSI (2M-4M)
+// Maps renewal circuit count to the correct MSI product catalog ID + standardized name.
+// Tiers match the HubSpot product library naming convention: MSI (xk-yk).
+const MSI_PRODUCT_TIERS: { max: number; id: string; name: string }[] = [
+  { max: 2_500,     id: "1618654015", name: "MSI (1k-2.5k)"    },
+  { max: 5_000,     id: "1618656776", name: "MSI (2.5k-5k)"    },
+  { max: 10_000,    id: "1618656777", name: "MSI (5k-10k)"     },
+  { max: 50_000,    id: "1618654016", name: "MSI (10k-50k)"    },
+  { max: 100_000,   id: "2086570789", name: "MSI (50k-100k)"   },
+  { max: 500_000,   id: "2086400308", name: "MSI (100k-500k)"  },
+  { max: 800_000,   id: "2086400312", name: "MSI (500k-800k)"  },
+  { max: 2_000_000, id: "2086570803", name: "MSI (800k-2M)"    },
+  { max: 4_000_000, id: "2086400317", name: "MSI (2M-4M)"      },
 ];
 
 function getMsiProductId(renewalCount: number): string | null {
   return MSI_PRODUCT_TIERS.find((t) => renewalCount <= t.max)?.id ?? null;
+}
+
+function getMsiProductName(renewalCount: number): string {
+  return MSI_PRODUCT_TIERS.find((t) => renewalCount <= t.max)?.name ?? "MSI License";
 }
 
 // Clone all line items from sourceDealId to targetDealId.
@@ -594,10 +734,13 @@ export async function cloneLineItemsToDeal(
     if (i === 0) {
       // Primary MSI line item — use the catalog product (no custom price) so
       // HubSpot pulls the list price and amount auto-populates.
+      // Use the standardized tier name (e.g. "MSI (10k-50k)") rather than the
+      // catalog's default name or whatever the source deal had.
       const productId = getMsiProductId(renewalCount);
+      const productName = getMsiProductName(renewalCount);
       await createLineItem(
         targetDealId,
-        item.properties?.name ?? "MSI License",
+        productName,
         renewalCount,
         null, // let catalog populate price/amount
         null,
@@ -619,11 +762,21 @@ export async function cloneLineItemsToDeal(
   }
 }
 
-// Look up the active (non-terminated) extension deal for a company and return
-// its ID + line items so the process route can copy them to the renewal deal.
-export async function getExtensionDealForCompany(
+// Extract the human-readable extension type from a deal name.
+// e.g. "Eastex (MSI - Extension POM Prorated)"      → "POM"
+//      "Eastex (MSI Extension - Fiber Clarity Prorated)" → "Fiber Clarity"
+function extractExtensionName(dealName: string): string {
+  const match = dealName.match(/Extension\s*[-–]?\s*([^)]+)/i);
+  if (!match) return dealName;
+  return match[1].replace(/\s*prorated\s*$/i, "").trim();
+}
+
+// Look up ALL active (non-terminated) extension deals for a company and return
+// each deal's ID + display name + line items so the process route can copy them
+// to the renewal deal. A company can have multiple extension deals (e.g. POM + FOM).
+export async function getExtensionDealsForCompany(
   company: string
-): Promise<{ id: string; lineItems: any[] } | null> {
+): Promise<{ id: string; extensionName: string; lineItems: any[] }[]> {
   const deals = await searchDeals(
     [
       { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
@@ -634,6 +787,8 @@ export async function getExtensionDealForCompany(
   ).catch(() => []);
 
   const needle = company.toLowerCase();
+  const matched: { id: string; extensionName: string; lineItems: any[] }[] = [];
+
   for (const deal of deals) {
     if (deal.properties?.service_terminated) continue;
     const name: string = deal.properties?.dealname ?? "";
@@ -642,9 +797,18 @@ export async function getExtensionDealForCompany(
     if (idx <= 0) continue;
     if (name.slice(0, idx).trim().toLowerCase() !== needle) continue;
     const lineItems = await getDealLineItems(deal.id).catch(() => []);
-    return { id: deal.id, lineItems };
+    matched.push({ id: deal.id, extensionName: extractExtensionName(name), lineItems });
   }
-  return null;
+
+  return matched;
+}
+
+/** @deprecated Use getExtensionDealsForCompany (returns all matches) */
+export async function getExtensionDealForCompany(
+  company: string
+): Promise<{ id: string; lineItems: any[] } | null> {
+  const all = await getExtensionDealsForCompany(company);
+  return all[0] ?? null;
 }
 
 // For auto-renew deals: write an italic "MSI Year N - X,XXX" entry into the M1 note.
@@ -670,40 +834,75 @@ export async function appendAutoRenewalEntry(
 
   const formatted = new Intl.NumberFormat("en-US").format(renewalCount);
 
-  // Already italic — nothing to do
-  const alreadyItalic = new RegExp(
-    `<(?:em|i)[^>]*>[^<]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\b`,
+  // Helper: given the text after "Year N - ", rewrite it to show the billing
+  // amount as the main figure. Paren-only entries like "(41,500)" become
+  // "45,350 (41,500)"; entries whose main count already equals renewalCount
+  // are returned unchanged; others are also left as-is.
+  function rewriteSuffix(suffix: string): string {
+    const s = suffix.trim();
+    const parenOnlyM = s.match(/^\((\d[\d,]*)\)/);
+    if (parenOnlyM) {
+      // Paren-only "(41,500)" → "45,350 (41,500)"
+      return `${formatted} (${parenOnlyM[1]})`;
+    }
+    return s; // keep existing "X,XXX" or "X,XXX (Y,YYY)" as-is
+  }
+
+  // Already italic — check whether it's paren-only and needs rewriting.
+  const alreadyItalicRe = new RegExp(
+    `(<(?:em|i)[^>]*>)([^<]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\s*[-–—−]([^<]*))(<\\/(?:em|i)>)`,
     "i"
   );
-  if (alreadyItalic.test(html)) return;
+  const italicMatch = alreadyItalicRe.exec(html);
+  if (italicMatch) {
+    const suffix = italicMatch[3].trim();
+    if (/^\([\d,]+\)/.test(suffix)) {
+      // Paren-only italic entry — rewrite to include billing amount
+      const newInner = `MSI Year ${nextMsiYear} - ${rewriteSuffix(suffix)}`;
+      await updateNoteBody(noteId, html.replace(alreadyItalicRe,
+        (_, open, _inner, _suffix, close) => `${open}${newInner}${close}`
+      ));
+    }
+    return; // already italic (correct or just fixed above)
+  }
 
-  // Non-italic entry exists — italicize in place
+  // Non-italic entry exists — italicize, rewriting paren-only content
   const existingEntry = new RegExp(
-    `(>)([ \\t]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\s*[-–—−][^<]*)(<)`,
+    `(>)([ \\t]*(?:MSI\\s+)?Year\\s+${nextMsiYear}\\s*[-–—−])([^<]*)(<)`,
     "gi"
   );
   if (existingEntry.test(html)) {
     const updated = html.replace(
       existingEntry,
-      (_, open, content, close) => `${open}<em>${content.trim()}</em>${close}`
+      (_, open, prefix, rest, close) => {
+        const newSuffix = rewriteSuffix(rest);
+        return `${open}<em>${prefix.trim()} ${newSuffix}</em>${close}`;
+      }
     );
     await updateNoteBody(noteId, updated);
     return;
   }
 
-  // No entry for this year — insert as a bullet after the last </li> if bullets
-  // are present; otherwise append a plain <p> at the end.
+  // No entry for this year — insert into the FIRST <ul> block (the order-form
+  // list), just before its closing </ul>.  Notes can have multiple lists
+  // (e.g. "Order Form" + "Extensions") so we target only the first one.
+  // Fall back to appending a plain <p> if no list is found.
   const newEntry = `<em>MSI Year ${nextMsiYear} - ${formatted}</em>`;
-  const lastLiEnd = html.lastIndexOf("</li>");
-  if (lastLiEnd !== -1) {
-    const insertAt = lastLiEnd + 5; // just after </li>
-    await updateNoteBody(
-      noteId,
-      html.slice(0, insertAt) + `<li>${newEntry}</li>` + html.slice(insertAt)
-    );
-  } else {
-    await updateNoteBody(noteId, html.trimEnd() + `\n<p>${newEntry}</p>`);
+  const firstUlOpen = html.indexOf("<ul");
+  if (firstUlOpen !== -1) {
+    const firstUlClose = html.indexOf("</ul>", firstUlOpen);
+    if (firstUlClose !== -1) {
+      // Match the bullet style already used in the note (with inner <p>) so the
+      // new entry renders consistently with the existing year entries.
+      const newLi = `<li><p style="margin:0;">${newEntry}</p></li>`;
+      await updateNoteBody(
+        noteId,
+        html.slice(0, firstUlClose) + newLi + html.slice(firstUlClose)
+      );
+      return;
+    }
   }
+  await updateNoteBody(noteId, html.trimEnd() + `\n<p>${newEntry}</p>`);
 }
 
 // Sum all line items on a deal and write the annual MRR (total / 12) to `amount`.

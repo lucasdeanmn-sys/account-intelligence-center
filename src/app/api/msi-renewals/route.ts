@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
@@ -7,14 +7,42 @@ import type { RenewalEntry } from "@/lib/types";
 export const maxDuration = 90;
 export const dynamic = "force-dynamic";
 
+// Normalize a company name for fuzzy matching: lowercase, strip punctuation/spaces.
+// "Fiber Connect" → "fiberconnect", "La Ward Telephone" → "lawardtelephone"
+function normName(s: string): string {
+  return s.toLowerCase().replace(/[\s\-_.,&()'"]/g, "");
+}
+
+// Returns true if two company name strings refer to the same company.
+function companyNamesMatch(a: string, b: string): boolean {
+  const na = a.toLowerCase().trim();
+  const nb = b.toLowerCase().trim();
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  // Also try stripped comparison ("FiberConnect" ↔ "Fiber Connect")
+  const nna = normName(a);
+  const nnb = normName(b);
+  return nna.includes(nnb) || nnb.includes(nna);
+}
+
 function extractCompany(dealName: string): string {
-  const idx = dealName.indexOf(" (MSI");
-  return idx > 0 ? dealName.slice(0, idx).trim() : dealName.trim();
+  // Standard format: "Company Name (MSI - Year N)"
+  const parenIdx = dealName.indexOf(" (MSI");
+  if (parenIdx > 0) return dealName.slice(0, parenIdx).trim();
+  // Non-standard: "Company Name MSI Year N" (no parentheses)
+  const plainIdx = dealName.indexOf(" MSI");
+  if (plainIdx > 0) return dealName.slice(0, plainIdx).trim();
+  return dealName.trim();
 }
 
 // Handles regular hyphen, en dash, and em dash
 function extractYearFromName(dealName: string): number | null {
-  const m = dealName.match(/MSI\s*[-–—]\s*Year\s*(\d+)/i);
+  // Matches all formats:
+  //   "MSI - Year N"   → standard format (dash before Year)
+  //   "MSI Year N"     → no dash
+  //   "MSI Year - N"   → non-standard (dash after Year, e.g. Fiber Connect)
+  //   "MSI – Year N"   → en dash variants
+  const m = dealName.match(/MSI\s*[-–—]?\s*Year\s*[-–—]?\s*(\d+)/i);
   return m ? parseInt(m[1], 10) : null;
 }
 
@@ -84,12 +112,13 @@ function parseM1Note(
   }
 
   // Collect all order/amendment notes. Accept:
-  //   "M1 Order Form", "MSI Order Form" (standard labels)
+  //   "M1 Order Form" / "M1 Order" / "MSI Order Form" (standard labels; some notes
+  //   omit "Form", e.g. "Updated 3 year M1 Order:")
   //   "M1 Amend" / "M1 Amendment" / "M1 Amendement" (amendment notes for extensions)
   const m1Notes = notes.filter((n) => {
     const lower = n.body.toLowerCase();
     return (
-      lower.includes("m1 order form") ||
+      lower.includes("m1 order") ||    // catches "M1 Order Form", "M1 Order:", etc.
       lower.includes("msi order form") ||
       lower.includes("m1 amend")       // catches "M1 Amendment" and "M1 Amendement"
     );
@@ -98,15 +127,26 @@ function parseM1Note(
     return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [] };
   }
 
-  // Pick the best note:
-  //  - Regular deal (msiYear known): prefer the note that mentions current or next year
-  //  - Extension deal (msiYear null): pick the note with the highest max year (most recent term)
+  // Pick the best note — always prefer the most recently created (highest note ID).
+  //
+  //  - Regular deal (msiYear known): among notes that mention the current or next
+  //    year, pick the one with the highest ID. Fall back to highest ID overall if
+  //    none mention those years.
+  //  - Extension deal (msiYear null): pick the note with the highest max year;
+  //    tiebreak by highest note ID.
+  //
+  // "Highest note ID = most recently created" is the key rule: if a deal has an
+  // old canceled note AND a newer updated note, the updated note always wins.
   const yearRe = (yr: number) => new RegExp(`(?:MSI\\s+)?Year\\s+${yr}\\b`, "i");
   let m1Note: typeof m1Notes[0];
   if (msiYear !== null) {
-    m1Note =
-      m1Notes.find((n) => yearRe(nextMsiYear ?? -1).test(n.body) || yearRe(msiYear).test(n.body)) ??
-      m1Notes[0];
+    const yearMatches = m1Notes.filter(
+      (n) => yearRe(nextMsiYear ?? -1).test(n.body) || yearRe(msiYear).test(n.body)
+    );
+    const candidates = yearMatches.length > 0 ? yearMatches : m1Notes;
+    m1Note = candidates.reduce((best, n) =>
+      parseInt(n.id ?? "0", 10) > parseInt(best.id ?? "0", 10) ? n : best
+    );
   } else {
     // Extension: use the note that covers the most recent year.
     // Tiebreak by note ID (larger = more recently created) to prefer the newest order form.
@@ -133,8 +173,11 @@ function parseM1Note(
     .replace(/&#x2014;/gi, "—")
     .replace(/&nbsp;/gi, " ");
 
-  // Year entry pattern: "MSI Year N - X,XXX" or "Year N - X,XXX" (some notes omit "MSI")
-  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*([\d,]+)/i;
+  // Year entry pattern: matches all three forms:
+  //   "MSI Year N - X,XXX"          → group 2 = main count
+  //   "MSI Year N - X,XXX (Y,YYY)"  → group 2 = main count (paren ignored here)
+  //   "MSI Year N - (X,XXX)"        → group 3 = paren-only count
+  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*(?:([\d,]+)(?:\s*\([^)]*\))?|\((\d[\d,]*)\))/i;
 
   // Collect italic (already-invoiced) entries
   const italicEntries = new Map<number, number>();
@@ -145,7 +188,8 @@ function parseM1Note(
     const hit = inner.match(yearEntryRe);
     if (hit) {
       const yr = parseInt(hit[1], 10);
-      const cnt = parseCount(hit[2]);
+      // Group 2 = main count; group 3 = paren-only count
+      const cnt = hit[2] ? parseCount(hit[2]) : (hit[3] ? parseCount(hit[3]) : null);
       if (cnt !== null) italicEntries.set(yr, cnt);
     }
   }
@@ -171,12 +215,20 @@ function parseM1Note(
   }
   const effectiveNextYear = effectiveMsiYear ? effectiveMsiYear + 1 : null;
 
-  // orderFormLicense: non-italic entry for the NEXT year.
-  // Prefer paren (new order-form qty); fall back to main; support paren-only entries.
+  // orderFormLicense: the contracted amount for the NEXT year from the M1 note.
+  // Primary source: non-italic entry (year not yet invoiced).
+  //   Prefer paren (new order-form qty); fall back to main; support paren-only entries.
+  // Fallback: italic entry for the same year — handles notes where all years were
+  //   pre-italicized at creation time (e.g. "Updated 3 year M1 Order:" with all
+  //   entries already in <em> tags). The contracted amount is still valid.
   let orderFormLicense: number | null = null;
-  if (effectiveNextYear !== null && nonItalicEntries.has(effectiveNextYear)) {
-    const e = nonItalicEntries.get(effectiveNextYear)!;
-    orderFormLicense = e.paren ?? e.main;
+  if (effectiveNextYear !== null) {
+    if (nonItalicEntries.has(effectiveNextYear)) {
+      const e = nonItalicEntries.get(effectiveNextYear)!;
+      orderFormLicense = e.paren ?? e.main;
+    } else if (italicEntries.has(effectiveNextYear)) {
+      orderFormLicense = italicEntries.get(effectiveNextYear)!;
+    }
   }
 
   // currentYearLicense: current year count for auto-renew baseline.
@@ -261,24 +313,232 @@ export async function GET(req: NextRequest) {
     const renewalStartDate = addOneYear(startDate);
     const expirationDate = lastDayOfPreviousMonth(renewalStartDate);
 
-    // Fetch HubSpot deals, active extensions, CSA data, and processed stage IDs in parallel.
-    // CSA errors are non-fatal; other lookups default to safe empty values.
-    const [currentDeals, renewalDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
+    // Fetch HubSpot deals, CSA data, extensions, and processed stage IDs in parallel.
+    // The subscription_start_date search is the primary source.
+    // CSA is the authoritative list of which companies are renewing this month —
+    // any CSA instance not found by the date search gets a targeted name lookup.
+    const renewalStartMs = new Date(renewalStartDate + "T00:00:00.000Z").getTime();
+    const renewalEndMs   = new Date(renewalStartDate + "T23:59:59.999Z").getTime();
+
+    const [startDateDeals, renewalDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
       getMsiDealsByStartDate(startDate),
       getMsiDealsByStartDate(renewalStartDate),
       fetchCsaForMonth(expirationDate).catch((err: Error) => {
         console.error("CSA fetch error (non-fatal):", err.message);
         return null;
       }),
-      getActiveExtensionCompanies().catch(() => new Set<string>()),
+      getActiveExtensionCompanies().catch(() => new Map<string, string[]>()),
       getProcessedStageIds().catch(() => new Set<string>()),
     ]);
 
-    // Keep only main MSI deals — extension deals live in the extensions pipeline
-    // and are excluded here; they surface as the hasExtension flag on the parent deal.
+    // Build a lookup map from extracted company name → deal for the startDateDeals pool.
+    // Skip extension deals — they share the company name but belong to a separate pipeline;
+    // including them here would block the CSA name-search fallback for companies like BEC.
+    const startDateMap = new Map<string, any>();
+    for (const d of startDateDeals) {
+      if (/extension/i.test(d.properties?.dealname ?? "")) continue;
+      const co = extractCompany(d.properties?.dealname ?? "");
+      if (co && !startDateMap.has(co.toLowerCase())) {
+        startDateMap.set(co.toLowerCase(), d);
+      }
+    }
+
+    const seenIds = new Set<string>();
+    const currentDeals: any[] = [];
+    // Debug info: track how each CSA instance was resolved (for troubleshooting)
+    const _csaDebug: { instance: string; method: string; dealName?: string }[] = [];
+
+    if (csaResult?.instances?.length) {
+      // CSA is the authoritative list. For each CSA instance, find its HubSpot deal:
+      //   Tier 1 — startDate pool (fastest: already fetched, no extra API call)
+      //   Tier 2 — instanceId → company → deals (reliable: bypasses name matching entirely)
+      //   Tier 3 — name-based token search (last resort for companies missing an instanceId)
+      const needFallback: typeof csaResult.instances = [];
+
+      for (const inst of csaResult.instances) {
+        // Tier 1: subscription_start_date pool
+        let found: any = null;
+        for (const [co, deal] of Array.from(startDateMap.entries())) {
+          if (companyNamesMatch(co, inst.instanceName)) { found = deal; break; }
+        }
+        if (found && !seenIds.has(found.id)) {
+          seenIds.add(found.id);
+          currentDeals.push(found);
+          _csaDebug.push({ instance: inst.instanceName, method: "startDate", dealName: found.properties?.dealname });
+        } else if (!found) {
+          needFallback.push(inst);
+          _csaDebug.push({ instance: inst.instanceName, method: "pending" });
+        }
+      }
+
+      if (needFallback.length > 0) {
+        // Tier 2: instanceId → company → deals
+        // Skip for null-instanceId instances (new customers pre-kickoff) — avoids a
+        // pointless search for noc_instance_id="null" and falls straight to Tier 3.
+        const instanceIdResults = await Promise.allSettled(
+          needFallback.map((inst) =>
+            inst.instanceId !== null
+              ? getMsiDealsByCompanyInstanceId(inst.instanceId)
+              : Promise.resolve([])
+          )
+        );
+
+        const needNameSearch: typeof csaResult.instances = [];
+
+        for (let i = 0; i < needFallback.length; i++) {
+          const res = instanceIdResults[i];
+          const inst = needFallback[i];
+          const debugIdx = _csaDebug.findIndex(d => d.instance === inst.instanceName && d.method === "pending");
+
+          if (res.status !== "fulfilled" || !res.value.length) {
+            // instanceId search failed or returned nothing — fall through to name search
+            needNameSearch.push(inst);
+            if (debugIdx >= 0) _csaDebug[debugIdx].method = "instanceId:noResults→nameSearch";
+            continue;
+          }
+
+          // Filter: must be an MSI non-extension deal.
+          // Prefer deals outside the renewal window (those are the CURRENT year deals).
+          // If the company only has renewal-window deals (new Year-1 customer), allow
+          // those through — their first deal starts on renewalStartDate.
+          const msiDeals = res.value.filter((d: any) => {
+            const name = d.properties?.dealname ?? "";
+            return name.includes("MSI") && !/extension/i.test(name);
+          });
+          const nonRenewalCandidates = msiDeals.filter((d: any) => {
+            const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
+            // Require a real start date (> 0) AND not in the upcoming renewal window.
+            // Deals with no start date (ssd=0) are treated as undated future deals and
+            // excluded here — they fall through to the msiDeals fallback only if no
+            // dated non-renewal deal exists (new Year-1 customers).
+            return ssd > 0 && !(ssd >= renewalStartMs && ssd <= renewalEndMs);
+          });
+          const candidates = nonRenewalCandidates.length > 0 ? nonRenewalCandidates : msiDeals;
+
+          if (!candidates.length) {
+            needNameSearch.push(inst);
+            if (debugIdx >= 0) _csaDebug[debugIdx].method = "instanceId:noMsiMatch→nameSearch";
+            continue;
+          }
+
+          // Pick best: highest MSI year → latest subscription_start_date
+          candidates.sort((a: any, b: any) => {
+            const yA = extractYearFromName(a.properties?.dealname ?? "") ?? 0;
+            const yB = extractYearFromName(b.properties?.dealname ?? "") ?? 0;
+            if (yB !== yA) return yB - yA;
+            const sA = parseInt(a.properties?.subscription_start_date ?? "0", 10);
+            const sB = parseInt(b.properties?.subscription_start_date ?? "0", 10);
+            return sB - sA;
+          });
+
+          const best = candidates[0];
+          if (!seenIds.has(best.id)) {
+            seenIds.add(best.id);
+            currentDeals.push(best);
+            if (debugIdx >= 0) {
+              _csaDebug[debugIdx].method = "instanceId:found";
+              _csaDebug[debugIdx].dealName = best.properties?.dealname;
+            }
+          }
+        }
+
+        // Tier 3: name-based token search for anything still unresolved
+        if (needNameSearch.length > 0) {
+          const nameResults = await Promise.allSettled(
+            needNameSearch.map((inst) => searchMsiDealsByCompanyName(inst.instanceName))
+          );
+
+          for (let i = 0; i < needNameSearch.length; i++) {
+            const res = nameResults[i];
+            const inst = needNameSearch[i];
+            const debugIdx = _csaDebug.findIndex(d => d.instance === inst.instanceName && (d.method.startsWith("instanceId:") || d.method === "pending"));
+
+            if (res.status !== "fulfilled") {
+              if (debugIdx >= 0) _csaDebug[debugIdx].method = "nameSearch:error";
+              continue;
+            }
+
+            const returnedNames = res.value.map((d: any) => d.properties?.dealname ?? "?").join(" | ");
+
+            const candidates = res.value.filter((d: any) => {
+              if (/extension/i.test(d.properties?.dealname ?? "")) return false;
+              // For companies with a CSA instanceId, skip deals in the upcoming renewal
+              // window (those are the Year N+1 deals already created, not Year N).
+              // For null-instanceId companies (new customers pre-kickoff), their first
+              // deal may start on renewalStartDate so we allow it through.
+              if (inst.instanceId !== null) {
+                const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
+                if (ssd >= renewalStartMs && ssd <= renewalEndMs) return false;
+              }
+              const co = extractCompany(d.properties?.dealname ?? "");
+              return companyNamesMatch(co, inst.instanceName);
+            });
+
+            if (!candidates.length) {
+              if (debugIdx >= 0) _csaDebug[debugIdx].method = `nameSearch:noMatch(returned:${returnedNames})`;
+              continue;
+            }
+
+            candidates.sort((a: any, b: any) => {
+              const yA = extractYearFromName(a.properties?.dealname ?? "") ?? 0;
+              const yB = extractYearFromName(b.properties?.dealname ?? "") ?? 0;
+              if (yB !== yA) return yB - yA;
+              const sA = parseInt(a.properties?.subscription_start_date ?? "0", 10);
+              const sB = parseInt(b.properties?.subscription_start_date ?? "0", 10);
+              return sB - sA;
+            });
+
+            const best = candidates[0];
+            if (!seenIds.has(best.id)) {
+              seenIds.add(best.id);
+              currentDeals.push(best);
+              if (debugIdx >= 0) {
+                _csaDebug[debugIdx].method = "nameSearch:found";
+                _csaDebug[debugIdx].dealName = best.properties?.dealname;
+              }
+            }
+          }
+        }
+      }
+      // Mop-up: catch any startDate MSI deals for companies not covered by a CSA instance
+      // (e.g. new customers pre-kickoff who have an active HubSpot deal but no CSA record).
+      // Deduplicate by company name and pick the highest MSI year to avoid pulling in
+      // old-year deals for companies already resolved via instanceId search.
+      const seenCompanyNorms = new Set(
+        currentDeals.map((d: any) => normName(extractCompany(d.properties?.dealname ?? "")))
+      );
+      const mopUpByCompany = new Map<string, any>(); // normName → best deal
+      for (const d of startDateDeals) {
+        if (seenIds.has(d.id)) continue;
+        const name = d.properties?.dealname ?? "";
+        if (!name.includes("MSI") || /extension/i.test(name)) continue;
+        // Skip non-annual MSI deals (e.g. "United (MSI Enable/Disable)") — require "Year N"
+        if (!/\bYear\b/i.test(name)) continue;
+        const co = normName(extractCompany(name));
+        if (seenCompanyNorms.has(co)) continue; // already covered by CSA match
+        const yr = extractYearFromName(name) ?? 0;
+        const prev = mopUpByCompany.get(co);
+        const prevYr = prev ? (extractYearFromName(prev.properties?.dealname ?? "") ?? 0) : -1;
+        if (yr > prevYr) mopUpByCompany.set(co, d);
+      }
+      for (const [, d] of Array.from(mopUpByCompany.entries())) {
+        seenIds.add(d.id);
+        currentDeals.push(d);
+        const name = d.properties?.dealname ?? "";
+        _csaDebug.push({ instance: extractCompany(name), method: "startDate:noCSA", dealName: name });
+      }
+    } else {
+      // CSA unavailable — fall back to the subscription_start_date results as-is
+      for (const d of startDateDeals) {
+        if (!seenIds.has(d.id)) { seenIds.add(d.id); currentDeals.push(d); }
+      }
+    }
+
+    // Keep only main MSI deals — extension deals live in the extensions pipeline.
+    // Also require "Year" in the name to exclude non-annual MSI deals (e.g. "MSI Enable/Disable").
     const filtered = currentDeals.filter((d: any) => {
       const name: string = d.properties?.dealname ?? "";
-      return name.includes("(MSI") && !/extension/i.test(name);
+      return name.includes("MSI") && !/extension/i.test(name) && /\bYear\b/i.test(name);
     });
 
     if (!filtered.length) {
@@ -299,11 +559,22 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Fetch notes and company noc_instance_ids in parallel
-    const [notesAndItems, nocIdMap] = await Promise.all([
+    // Fetch notes, company noc_instance_ids, and fresh deal properties in parallel.
+    // getDealsByIds uses the batch/read endpoint (not search) so it bypasses HubSpot's
+    // search-index lag — important for detecting service_terminated set moments ago.
+    const filteredIds = filtered.map((d: any) => d.id);
+    const [notesAndItems, nocIdMap, freshDeals] = await Promise.all([
       fetchNotesBatched(filtered),
-      getDealCompanyNocIds(filtered.map((d: any) => d.id)),
+      getDealCompanyNocIds(filteredIds),
+      getDealsByIds(filteredIds, ["service_terminated"]).catch(() => []),
     ]);
+
+    // Build a map from deal ID → fresh service_terminated value
+    const freshSvcTermMap = new Map<string, string>();
+    for (const d of freshDeals) {
+      const val = d.properties?.service_terminated;
+      if (val) freshSvcTermMap.set(String(d.id), val);
+    }
 
     // Parse M1 notes with regex (fast, no AI required)
     const parsedMap = new Map<string, M1Parsed>();
@@ -319,13 +590,17 @@ export async function GET(req: NextRequest) {
 
     // CSA id → circuits map (empty if CSA fetch failed)
     const csaIdMap: Map<number, number> = csaResult?.idMap ?? new Map();
+    const multiTenantIds: Set<number> = csaResult?.multiTenantIds ?? new Set();
 
     // Build a map from CSA instance ID → instance name so we can write the
     // canonical sheet name (e.g. "BEC Communication") rather than the HubSpot
     // deal name (e.g. "Bartlett Electric Cooperative").
+    // Build instance ID → name map. Use the first name encountered for each ID
+    // so that when multiple records share an ID (sub-tenants), the primary/first
+    // CSA name wins rather than being overwritten by the sub-tenant entry.
     const instanceNameByIdMap = new Map<number, string>();
     for (const inst of csaResult?.allInstances ?? []) {
-      if (inst.instanceId !== null) {
+      if (inst.instanceId !== null && !instanceNameByIdMap.has(inst.instanceId)) {
         instanceNameByIdMap.set(inst.instanceId, inst.instanceName);
       }
     }
@@ -357,24 +632,41 @@ export async function GET(req: NextRequest) {
       const csaInstanceName: string | null =
         nocInstanceId != null ? (instanceNameByIdMap.get(nocInstanceId) ?? null) : null;
 
-      // Order form always wins; auto-renew takes max(CSA rounded, current year)
+      // Renewal count = max(order form, CSA rounded, current year license).
+      // Order form sets the contracted floor, but if actual usage (CSA rounded)
+      // has grown beyond the contracted amount we bill the higher number.
       let renewalCount: number | null = null;
-      if (orderFormLicense !== null) {
-        renewalCount = orderFormLicense;
-      } else if (csaRounded !== null || currentYearLicense !== null) {
-        renewalCount = Math.max(csaRounded ?? 0, currentYearLicense ?? 0);
+      if (orderFormLicense !== null || csaRounded !== null || currentYearLicense !== null) {
+        renewalCount = Math.max(orderFormLicense ?? 0, csaRounded ?? 0, currentYearLicense ?? 0);
       }
 
       const renewalDeal = renewalDealMap.get(company.toLowerCase()) ?? null;
       const renewalDealName = `${company} (MSI - Year ${nextMsiYear ?? "?"})`;
 
       const dealName = deal.properties?.dealname ?? "";
-      const hasExtension = extensionCompanies.has(company.toLowerCase());
+      const extensionNames = extensionCompanies.get(company.toLowerCase()) ?? [];
+      const hasExtension = extensionNames.length > 0;
 
-      // A deal is considered processed if a renewal deal exists AND that deal
-      // is in a "Closed Won - Ready for Billing" or "Closed Won - Invoiced" stage.
+      // A deal is considered processed if:
+      //   (a) a renewal deal exists in a "Ready for Billing" / "Invoiced" stage, OR
+      //   (b) service_terminated is set on the current deal (set by the process route).
+      //
+      // For (b) we check two sources in order:
+      //   1. freshSvcTermMap — populated from getDealsByIds (batch/read, bypasses
+      //      search-index lag, best for deals processed moments ago)
+      //   2. deal.properties.service_terminated — the value already returned by the
+      //      initial getMsiDealsByStartDate search (reliable once the index catches up,
+      //      and a safe fallback if getDealsByIds fails silently)
       const renewalStage: string = renewalDeal?.properties?.dealstage ?? "";
-      const processed = !!(renewalDeal && renewalStage && processedStageIds.has(renewalStage));
+      const svcTerminated =
+        freshSvcTermMap.get(deal.id) ??
+        (deal.properties?.service_terminated || null);
+      const processed = !!(
+        (renewalDeal && renewalStage && processedStageIds.has(renewalStage)) ||
+        svcTerminated
+      );
+
+      const multiTenant = nocInstanceId != null && multiTenantIds.has(nocInstanceId);
 
       return {
         currentDealId: deal.id,
@@ -397,7 +689,9 @@ export async function GET(req: NextRequest) {
         nocInstanceId,
         csaInstanceName,
         sheetNote: computeSheetNote(orderFormLicense, nextMsiYear, parsed.allYearsInNote ?? []),
+        extensionNames,
         processed,
+        multiTenant,
       };
     });
 
@@ -406,7 +700,7 @@ export async function GET(req: NextRequest) {
     const csaInstances: CsaInstance[] = csaResult?.allInstances ?? [];
     const csaError: string | null = csaResult === null ? "CSA data unavailable" : null;
 
-    return NextResponse.json({ deals: entries, expirationDate, renewalStartDate, csaInstances, csaError });
+    return NextResponse.json({ deals: entries, expirationDate, renewalStartDate, csaInstances, csaError, _csaDebug });
   } catch (error: any) {
     console.error("MSI renewals GET error:", error);
     return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
