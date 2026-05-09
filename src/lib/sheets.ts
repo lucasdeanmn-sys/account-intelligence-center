@@ -139,17 +139,72 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
       { values: [updateValues] }
     );
   } else {
-    // Company not found — append a new row after the last content row
-    const allData = await sheetsGet(
-      `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A:I")}`
+    // Company not found — insert a new row in alphabetical order within the table.
+    // Normalise names for comparison (strip legal suffixes, auto-renew marker, case).
+    const normForSort = (s: string) =>
+      s.toLowerCase().trim()
+       .replace(/\s*\(auto-renew\)\s*$/i, "")
+       .replace(/[,.]?\s*(llc|inc|co|corp|ltd)\.?\s*$/i, "")
+       .trim();
+    const normDisplay = normForSort(displayName);
+
+    // Skip header / empty rows; find first data row whose name sorts after ours.
+    let insertAtIndex = -1; // 0-based sheet index; -1 = append after last data row
+    for (let i = 0; i < colAB.length; i++) {
+      const cellB = (colAB[i]?.[1] ?? "").trim();
+      if (!cellB || cellB.toLowerCase() === "company") continue; // header / empty
+      if (normDisplay < normForSort(cellB)) {
+        insertAtIndex = i;
+        break;
+      }
+    }
+
+    // Get the numeric sheetId for this tab (needed for insertDimension)
+    const meta = await sheetsGet(
+      `/spreadsheets/${SHEET_ID}?fields=sheets.properties`
     );
-    const allRows: any[][] = allData.values ?? [];
-    const newRowNum = allRows.length + 1;
-    const range = encodeURIComponent(`${tab}!A${newRowNum}:I${newRowNum}`);
-    await sheetsPut(
-      `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
-      { values: [["", ...updateValues]] }
+    const sheet = (meta.sheets ?? []).find(
+      (s: any) => s.properties?.title === monthLabel
     );
+
+    if (sheet && insertAtIndex !== -1) {
+      // Insert a blank row at the correct alphabetical position, inheriting the
+      // formatting of the row below it (i.e. an existing data row) so it looks
+      // like part of the table.
+      const sheetId: number = sheet.properties.sheetId;
+      await sheetsPost(`/spreadsheets/${SHEET_ID}:batchUpdate`, {
+        requests: [{
+          insertDimension: {
+            range: {
+              sheetId,
+              dimension: "ROWS",
+              startIndex: insertAtIndex,       // 0-based: insert before this row
+              endIndex:   insertAtIndex + 1,
+            },
+            inheritFromBefore: false, // copy formatting from the row now below
+          },
+        }],
+      });
+      // Write data into the newly inserted row (1-based = insertAtIndex + 1)
+      const newRowNum = insertAtIndex + 1;
+      const range = encodeURIComponent(`${tab}!A${newRowNum}:I${newRowNum}`);
+      await sheetsPut(
+        `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
+        { values: [["", ...updateValues]] }
+      );
+    } else {
+      // Fallback: append after the last data row (company sorts last, or tab not found)
+      const allData = await sheetsGet(
+        `/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab + "!A:I")}`
+      );
+      const allRows: any[][] = allData.values ?? [];
+      const newRowNum = allRows.length + 1;
+      const range = encodeURIComponent(`${tab}!A${newRowNum}:I${newRowNum}`);
+      await sheetsPut(
+        `/spreadsheets/${SHEET_ID}/values/${range}?valueInputOption=USER_ENTERED`,
+        { values: [["", ...updateValues]] }
+      );
+    }
   }
 }
 
