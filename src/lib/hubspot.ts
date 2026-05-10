@@ -181,6 +181,19 @@ export async function createNote(
   return note;
 }
 
+/** Create a note on a deal without requiring an owner.
+ *  Used by the cancel route to stamp "Did not renew" on deals that have no
+ *  existing M1 note, so the server-side cancelled detection works on re-run. */
+export async function createDealNote(dealId: string, htmlBody: string): Promise<void> {
+  const note = await hs("POST", "/crm/v3/objects/notes", {
+    properties: {
+      hs_note_body: htmlBody,
+      hs_timestamp: new Date().toISOString(),
+    },
+  });
+  await associate("notes", note.id, "deals", dealId);
+}
+
 export async function createTask(
   dealId: string,
   subject: string,

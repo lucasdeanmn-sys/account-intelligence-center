@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateNoteBody } from "@/lib/hubspot";
+import { updateNoteBody, createDealNote } from "@/lib/hubspot";
 import { cancelRenewalRow } from "@/lib/sheets";
 import { googleConfigured } from "@/lib/google";
 
@@ -7,19 +7,35 @@ export const maxDuration = 30;
 
 export async function POST(req: NextRequest) {
   try {
-    const { m1NoteId, m1NoteHtml, company, expirationDate, csaInstanceName } =
+    const { m1NoteId, m1NoteHtml, company, expirationDate, csaInstanceName, currentDealId } =
       await req.json();
 
     let noteError: string | null = null;
     let sheetError: string | null = null;
 
-    // 1. Prepend "Did not renew" to the top of the M1 note in HubSpot.
-    // Guard against duplicates: skip if the note already contains the marker.
+    // 1. Stamp "Did not renew" onto the deal in HubSpot so the server-side
+    //    cancelled detection (rawNotes.some("Did not renew")) works on every
+    //    subsequent report run — no reliance on localStorage.
+    //
+    //    Case A: deal has an M1 note → prepend the marker to that note.
+    //    Case B: no M1 note (e.g. auto-renew like Vexus) → create a new note.
+    //    Guard against duplicates in both cases.
     if (m1NoteId && m1NoteHtml != null && !m1NoteHtml.includes("Did not renew")) {
+      // Case A: update existing M1 note
       const prepended =
         `<p><strong>Did not renew</strong></p>\n` + m1NoteHtml;
       await updateNoteBody(m1NoteId, prepended).catch((e) => {
         console.warn("Cancel note update failed:", e.message);
+        noteError = e.message;
+      });
+    } else if (!m1NoteId && currentDealId) {
+      // Case B: no M1 note — create a standalone cancellation note so the
+      //         server can detect "Did not renew" on re-run without localStorage.
+      await createDealNote(
+        currentDealId,
+        "<p><strong>Did not renew</strong></p>"
+      ).catch((e) => {
+        console.warn("Cancel note creation failed:", e.message);
         noteError = e.message;
       });
     }

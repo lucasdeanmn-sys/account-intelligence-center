@@ -824,6 +824,7 @@ export default function MSITrackerPage() {
         company: entry.company,
         expirationDate: entry.expirationDate,
         csaInstanceName: entry.csaInstanceName ?? null,
+        currentDealId: entry.currentDealId,
       }),
     });
     const data = await res.json();
