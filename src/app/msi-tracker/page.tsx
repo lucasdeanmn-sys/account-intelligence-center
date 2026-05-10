@@ -22,6 +22,9 @@ interface CsaOverride {
 }
 const CSA_OVERRIDES_KEY = "csaOverrides_v1";
 const cancelledKey = (expirationDate: string) => `msi_cancelled_${expirationDate}`;
+// Secondary key stores company names — more resilient than deal IDs if the matching
+// algorithm selects a different deal record for the same company between runs.
+const cancelledCoKey = (expirationDate: string) => `msi_cancelled_co_${expirationDate}`;
 
 // ─── Confirmation Modal ───────────────────────────────────────────────────────
 
@@ -671,7 +674,9 @@ export default function MSITrackerPage() {
     localStorage.setItem(CSA_OVERRIDES_KEY, JSON.stringify(csaOverrides));
   }, [csaOverrides]);
 
-  // Persist cancelled deal IDs in localStorage keyed by expiration date
+  // Persist cancelled deal IDs + company names in localStorage keyed by expiration date.
+  // Two parallel keys: deal IDs (fast exact match) and company names (resilient to
+  // deal-ID changes if the matching algorithm picks a different record between runs).
   const [cancelledIds, setCancelledIds] = useState<Set<string>>(new Set());
   function loadCancelledIds(expDate: string) {
     try {
@@ -679,10 +684,19 @@ export default function MSITrackerPage() {
       return new Set<string>(stored);
     } catch { return new Set<string>(); }
   }
-  function persistCancelledId(expDate: string, dealId: string) {
+  function loadCancelledCompanies(expDate: string) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(cancelledCoKey(expDate)) ?? "[]");
+      return new Set<string>(stored);
+    } catch { return new Set<string>(); }
+  }
+  function persistCancelledId(expDate: string, dealId: string, company: string) {
     const ids = loadCancelledIds(expDate);
     ids.add(dealId);
     localStorage.setItem(cancelledKey(expDate), JSON.stringify(Array.from(ids)));
+    const cos = loadCancelledCompanies(expDate);
+    cos.add(company.trim().toLowerCase());
+    localStorage.setItem(cancelledCoKey(expDate), JSON.stringify(Array.from(cos)));
     setCancelledIds(new Set(ids));
   }
 
@@ -757,12 +771,18 @@ export default function MSITrackerPage() {
         return { ...d, csaCount, csaRounded, renewalCount };
       });
 
-      // Merge locally-persisted cancellations (covers deals with no M1 note to detect)
+      // Merge locally-persisted cancellations.
+      // Check both deal IDs (primary) and company names (fallback — survives deal-ID
+      // changes when the matching algorithm picks a different record between runs).
       const storedCancelled = loadCancelledIds(data.expirationDate ?? "");
+      const storedCancelledCos = loadCancelledCompanies(data.expirationDate ?? "");
       setCancelledIds(storedCancelled);
-      setDeals(deals.map((d) =>
-        storedCancelled.has(d.currentDealId) ? { ...d, cancelled: true } : d
-      ));
+      setDeals(deals.map((d) => {
+        if (d.cancelled) return d; // server already detected it — trust that
+        const byId = storedCancelled.has(d.currentDealId);
+        const byCo = storedCancelledCos.has(d.company.trim().toLowerCase());
+        return byId || byCo ? { ...d, cancelled: true } : d;
+      }));
     } catch (e: any) {
       setError(e.message || "Failed to load renewal data");
     } finally {
@@ -829,7 +849,7 @@ export default function MSITrackerPage() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Cancel failed");
-    persistCancelledId(entry.expirationDate, entry.currentDealId);
+    persistCancelledId(entry.expirationDate, entry.currentDealId, entry.company);
     setDeals((prev) =>
       prev.map((d) =>
         d.currentDealId === entry.currentDealId ? { ...d, cancelled: true } : d
