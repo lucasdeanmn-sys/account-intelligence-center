@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByCloseMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
@@ -320,13 +320,14 @@ export async function GET(req: NextRequest) {
     const renewalStartMs = new Date(renewalStartDate + "T00:00:00.000Z").getTime();
     const renewalEndMs   = new Date(renewalStartDate + "T23:59:59.999Z").getTime();
 
-    const [startDateDeals, renewalDeals, closeDateDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
+    const [startDateDeals, renewalDeals, startMonthDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
       getMsiDealsByStartDate(startDate),
       getMsiDealsByStartDate(renewalStartDate),
-      // closeDate pool: catches deals whose subscription_start_date is off by a few
-      // weeks (e.g. Syntrio ssd = June 19 instead of June 1) but whose closedate
-      // correctly falls in the expiration month.
-      getMsiDealsByCloseMonth(expirationDate.substring(0, 7)).catch(() => [] as any[]),
+      // startMonth pool: catches companies whose subscription_start_date is set to a
+      // non-standard day within the expected start month (e.g. Syntrio June 19 vs
+      // June 1). Searching the full month is more reliable than the closeDate approach
+      // because closedate is set when the deal was sold, not to the expiration date.
+      getMsiDealsByStartMonth(startDate.substring(0, 7)).catch(() => [] as any[]),
       fetchCsaForMonth(expirationDate).catch((err: Error) => {
         console.error("CSA fetch error (non-fatal):", err.message);
         return null;
@@ -354,8 +355,11 @@ export async function GET(req: NextRequest) {
     // subscription_start_date is before the renewal month (i.e. the current-year deal).
     // Using ssd < renewalStartMs rather than a single-day window because some companies
     // have non-standard start days (e.g. June 19 instead of June 1).
-    const closeDateMap = buildDealMap(
-      closeDateDeals.filter((d: any) => {
+    // startMonthMap: all deals starting in the same calendar month as startDate
+    // (e.g. June 2025), filtered to exclude future-year deals (ssd >= renewalStartMs).
+    // Syntrio starts June 19, 2025 — this catches it even though June 19 ≠ June 1.
+    const startMonthMap = buildDealMap(
+      startMonthDeals.filter((d: any) => {
         const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
         return ssd > 0 && ssd < renewalStartMs;
       })
@@ -382,8 +386,8 @@ export async function GET(req: NextRequest) {
           if (companyNamesMatch(co, inst.instanceName)) { found = deal; break; }
         }
         if (!found) {
-          for (const [co, deal] of Array.from(closeDateMap.entries())) {
-            if (companyNamesMatch(co, inst.instanceName)) { found = deal; foundMethod = "closeDate"; break; }
+          for (const [co, deal] of Array.from(startMonthMap.entries())) {
+            if (companyNamesMatch(co, inst.instanceName)) { found = deal; foundMethod = "startMonth"; break; }
           }
         }
         if (found && !seenIds.has(found.id)) {
@@ -486,13 +490,15 @@ export async function GET(req: NextRequest) {
 
             const candidates = res.value.filter((d: any) => {
               if (/extension/i.test(d.properties?.dealname ?? "")) return false;
-              // For companies with a CSA instanceId, skip deals in the upcoming renewal
-              // window (those are the Year N+1 deals already created, not Year N).
+              // For companies with a CSA instanceId, exclude deals whose term starts
+              // on or after the renewal date — those are next-year (Year N+1) deals.
+              // Uses ssd >= renewalStartMs (not a single-day window) so non-standard
+              // start dates like June 19 are also correctly excluded.
               // For null-instanceId companies (new customers pre-kickoff), their first
-              // deal may start on renewalStartDate so we allow it through.
+              // deal starts on renewalStartDate so we allow everything through.
               if (inst.instanceId !== null) {
                 const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
-                if (ssd >= renewalStartMs && ssd <= renewalEndMs) return false;
+                if (ssd > 0 && ssd >= renewalStartMs) return false;
               }
               const co = extractCompany(d.properties?.dealname ?? "");
               return companyNamesMatch(co, inst.instanceName);

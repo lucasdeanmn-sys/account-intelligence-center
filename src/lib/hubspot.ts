@@ -493,13 +493,14 @@ export async function searchMsiDealsByCompanyName(company: string): Promise<any[
 }
 
 /**
- * Fallback: find MSI deals whose closedate falls within a calendar month.
- * Used to catch deals whose subscription_start_date is set to the wrong date
- * but whose closedate correctly reflects the expiration month.
+ * Fetch MSI deals whose subscription_start_date falls anywhere within a calendar
+ * month.  More reliable than getMsiDealsByStartDate (which matches a single day)
+ * for companies whose start date is set to a non-standard day — e.g. Syntrio
+ * starts June 19, 2025 instead of June 1, 2025.
  *
- * yearMonth: "2026-05"
+ * yearMonth: "2025-06"
  */
-export async function getMsiDealsByCloseMonth(yearMonth: string): Promise<any[]> {
+export async function getMsiDealsByStartMonth(yearMonth: string): Promise<any[]> {
   const [y, m] = yearMonth.split("-").map(Number);
   const firstDay = new Date(`${yearMonth}-01T00:00:00.000Z`).getTime().toString();
   // Last millisecond of the last day of the month
@@ -507,8 +508,8 @@ export async function getMsiDealsByCloseMonth(yearMonth: string): Promise<any[]>
   const lastDay = lastDayDate.getTime().toString();
   return searchDeals(
     [
-      { propertyName: "closedate", operator: "GTE", value: firstDay },
-      { propertyName: "closedate", operator: "LTE", value: lastDay },
+      { propertyName: "subscription_start_date", operator: "GTE", value: firstDay },
+      { propertyName: "subscription_start_date", operator: "LTE", value: lastDay },
       { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
     ],
     ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
