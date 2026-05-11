@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo } from "@/lib/hubspot";
+import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
@@ -320,7 +321,7 @@ export async function GET(req: NextRequest) {
     const renewalStartMs = new Date(renewalStartDate + "T00:00:00.000Z").getTime();
     const renewalEndMs   = new Date(renewalStartDate + "T23:59:59.999Z").getTime();
 
-    const [startDateDeals, renewalDeals, startMonthDeals, csaResult, extensionCompanies, processedStageIds] = await Promise.all([
+    const [startDateDeals, renewalDeals, startMonthDeals, csaResult, extensionIndex, processedStageIds] = await Promise.all([
       getMsiDealsByStartDate(startDate),
       getMsiDealsByStartDate(renewalStartDate),
       // startMonth pool: catches companies whose subscription_start_date is set to a
@@ -332,7 +333,7 @@ export async function GET(req: NextRequest) {
         console.error("CSA fetch error (non-fatal):", err.message);
         return null;
       }),
-      getActiveExtensionCompanies().catch(() => new Map<string, string[]>()),
+      getActiveExtensionCompanies().catch((): ExtensionIndex => ({ byName: new Map(), byNocId: new Map() })),
       getProcessedStageIds().catch(() => new Set<string>()),
     ]);
 
@@ -674,15 +675,18 @@ export async function GET(req: NextRequest) {
       const renewalDealName = `${company} (MSI - Year ${nextMsiYear ?? "?"})`;
 
       const dealName = deal.properties?.dealname ?? "";
-      // Extension lookup: try exact company name, then normalised form, then CSA
-      // instance name (handles cases like MSI deal "Bartlett Electric Cooperative"
-      // vs extension deal "BEC Communication" — the CSA name bridges the gap).
+      // Extension lookup — preference order:
+      // 1. noc_instance_id (most reliable — shared company object, immune to name mismatches)
+      // 2. Exact lowercase company name from MSI deal
+      // 3. Normalised company name (strips LLC/Inc/etc.)
+      // 4. CSA instance name (exact and normalised) — bridges "Bartlett Electric" ↔ "BEC Communication"
       const extensionNames: string[] =
-        extensionCompanies.get(company.toLowerCase()) ??
-        extensionCompanies.get(normExtCo(company)) ??
+        (nocInstanceId != null ? extensionIndex.byNocId.get(nocInstanceId) : undefined) ??
+        extensionIndex.byName.get(company.toLowerCase()) ??
+        extensionIndex.byName.get(normExtCo(company)) ??
         (csaInstanceName
-          ? (extensionCompanies.get(csaInstanceName.toLowerCase()) ??
-             extensionCompanies.get(normExtCo(csaInstanceName)))
+          ? (extensionIndex.byName.get(csaInstanceName.toLowerCase()) ??
+             extensionIndex.byName.get(normExtCo(csaInstanceName)))
           : undefined) ??
         [];
       const hasExtension = extensionNames.length > 0;

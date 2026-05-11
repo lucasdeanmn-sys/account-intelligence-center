@@ -418,13 +418,20 @@ export function normExtCo(s: string): string {
     .trim();
 }
 
-// Returns a map from normalised company name → extension label(s).
-// Each extension deal is stored under BOTH the exact lowercase key AND the
-// normalised key so callers can look up with either form.
-/** Returns a map from lowercase (optionally normalised) company name → extension label(s), e.g.
- *  "henderson municipal" → ["POM", "Fiber Clarity"]
- */
-export async function getActiveExtensionCompanies(): Promise<Map<string, string[]>> {
+export interface ExtensionIndex {
+  /** Lookup by normalised/exact company name prefix from the deal name */
+  byName: Map<string, string[]>;
+  /** Lookup by noc_instance_id — the most reliable key because the same
+   *  company object is shared by both the MSI deal and its extension deal,
+   *  even when the two deals use different company name prefixes (e.g.
+   *  "Bartlett Electric Cooperative" MSI vs "BEC Communication" extension). */
+  byNocId: Map<number, string[]>;
+}
+
+/** Fetch all active MSI extension deals and index them by both name and
+ *  noc_instance_id so the route can find extensions regardless of whether
+ *  the extension deal name prefix matches the MSI deal company name. */
+export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
   const deals = await searchDeals(
     [
       { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
@@ -434,29 +441,49 @@ export async function getActiveExtensionCompanies(): Promise<Map<string, string[
     200
   ).catch(() => []);
 
-  const companies = new Map<string, string[]>();
+  const byName  = new Map<string, string[]>();
+  const byNocId = new Map<number, string[]>();
 
-  function addEntry(key: string, extName: string) {
-    const existing = companies.get(key) ?? [];
+  function addToName(key: string, extName: string) {
+    const existing = byName.get(key) ?? [];
     if (!existing.includes(extName)) existing.push(extName);
-    companies.set(key, existing);
+    byName.set(key, existing);
   }
 
+  // Active extension deals and their parsed extension names
+  const active: { dealId: string; extName: string }[] = [];
+
   for (const deal of deals) {
-    // Skip if the extension term has already been terminated
     if (deal.properties?.service_terminated) continue;
     const name: string = deal.properties?.dealname ?? "";
     const idx = name.indexOf(" (MSI");
     if (idx <= 0) continue;
-    const raw = name.slice(0, idx).trim();
+    const raw     = name.slice(0, idx).trim();
     const extName = extractExtensionName(name);
-    // Store under exact lowercase key AND normalised key (deduped)
-    const exactKey = raw.toLowerCase();
-    const normKey  = normExtCo(raw);
-    addEntry(exactKey, extName);
-    if (normKey !== exactKey) addEntry(normKey, extName);
+    // Store under exact lowercase key AND normalised key
+    addToName(raw.toLowerCase(), extName);
+    const normKey = normExtCo(raw);
+    if (normKey !== raw.toLowerCase()) addToName(normKey, extName);
+    active.push({ dealId: deal.id, extName });
   }
-  return companies;
+
+  // Cross-index by noc_instance_id so the route can match via the shared
+  // HubSpot company object even when names differ.
+  if (active.length) {
+    const nocIdMap = await getDealCompanyNocIds(active.map((a) => a.dealId)).catch(() =>
+      new Map<string, number | null>()
+    );
+    for (const { dealId, extName } of active) {
+      const nid = nocIdMap.get(dealId);
+      if (nid != null) {
+        const existing = byNocId.get(nid) ?? [];
+        if (!existing.includes(extName)) existing.push(extName);
+        byNocId.set(nid, existing);
+      }
+    }
+  }
+
+  return { byName, byNocId };
 }
 
 export async function getMsiDealsByStartDate(
