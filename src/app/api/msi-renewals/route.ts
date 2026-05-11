@@ -368,6 +368,11 @@ export async function GET(req: NextRequest) {
 
     const seenIds = new Set<string>();
     const currentDeals: any[] = [];
+    // Maps deal ID → the CSA instance name that was matched to it.
+    // More reliable than noc_instance_id for the extension lookup because it's set
+    // directly from the CSA match result — e.g. the Bartlett Electric Cooperative
+    // MSI deal maps to "BEC Communication" if the CSA instance is "BEC Communication".
+    const dealCSANameMap = new Map<string, string>();
     // Debug info: track how each CSA instance was resolved (for troubleshooting)
     const _csaDebug: { instance: string; method: string; dealName?: string }[] = [];
 
@@ -394,6 +399,7 @@ export async function GET(req: NextRequest) {
         if (found && !seenIds.has(found.id)) {
           seenIds.add(found.id);
           currentDeals.push(found);
+          dealCSANameMap.set(found.id, inst.instanceName);
           _csaDebug.push({ instance: inst.instanceName, method: foundMethod, dealName: found.properties?.dealname });
         } else if (!found) {
           needFallback.push(inst);
@@ -464,6 +470,7 @@ export async function GET(req: NextRequest) {
           if (!seenIds.has(best.id)) {
             seenIds.add(best.id);
             currentDeals.push(best);
+            dealCSANameMap.set(best.id, inst.instanceName);
             if (debugIdx >= 0) {
               _csaDebug[debugIdx].method = "instanceId:found";
               _csaDebug[debugIdx].dealName = best.properties?.dealname;
@@ -489,21 +496,24 @@ export async function GET(req: NextRequest) {
 
             const returnedNames = res.value.map((d: any) => d.properties?.dealname ?? "?").join(" | ");
 
-            const candidates = res.value.filter((d: any) => {
+            // First, filter to name-matching non-extension deals (no date constraint yet).
+            const allMatches = res.value.filter((d: any) => {
               if (/extension/i.test(d.properties?.dealname ?? "")) return false;
-              // For companies with a CSA instanceId, exclude deals whose term starts
-              // on or after the renewal date — those are next-year (Year N+1) deals.
-              // Uses ssd >= renewalStartMs (not a single-day window) so non-standard
-              // start dates like June 19 are also correctly excluded.
-              // For null-instanceId companies (new customers pre-kickoff), their first
-              // deal starts on renewalStartDate so we allow everything through.
-              if (inst.instanceId !== null) {
-                const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
-                if (ssd > 0 && ssd >= renewalStartMs) return false;
-              }
               const co = extractCompany(d.properties?.dealname ?? "");
               return companyNamesMatch(co, inst.instanceName);
             });
+            // For companies with a known instanceId, prefer deals outside the
+            // renewal window (current-year deals).  Mirror Tier 2's logic: fall
+            // back to all name-matches if every deal starts at/after renewalStart
+            // (e.g. a company whose deal ssd was recently updated or a Year-1 deal).
+            const candidates = (() => {
+              if (inst.instanceId === null || !allMatches.length) return allMatches;
+              const pastWindow = allMatches.filter((d: any) => {
+                const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
+                return ssd === 0 || ssd < renewalStartMs;
+              });
+              return pastWindow.length > 0 ? pastWindow : allMatches;
+            })();
 
             if (!candidates.length) {
               if (debugIdx >= 0) _csaDebug[debugIdx].method = `nameSearch:noMatch(returned:${returnedNames})`;
@@ -523,6 +533,7 @@ export async function GET(req: NextRequest) {
             if (!seenIds.has(best.id)) {
               seenIds.add(best.id);
               currentDeals.push(best);
+              dealCSANameMap.set(best.id, inst.instanceName);
               if (debugIdx >= 0) {
                 _csaDebug[debugIdx].method = "nameSearch:found";
                 _csaDebug[debugIdx].dealName = best.properties?.dealname;
@@ -531,15 +542,26 @@ export async function GET(req: NextRequest) {
           }
         }
       }
-      // Mop-up: catch any startDate MSI deals for companies not covered by a CSA instance
-      // (e.g. new customers pre-kickoff who have an active HubSpot deal but no CSA record).
+      // Mop-up: catch MSI deals for companies not covered by a CSA instance
+      // (e.g. new customers pre-kickoff who have an active HubSpot deal but no CSA record,
+      // or companies whose CSA instanceName didn't match any deal in Tiers 1-3).
+      // Sources: startDateDeals (exact-day ssd match) PLUS startMonthDeals filtered to
+      // pre-renewal dates — this ensures companies with a non-standard ssd (e.g. June 19
+      // instead of June 1) that also lack a CSA record still appear in the report.
       // Deduplicate by company name and pick the highest MSI year to avoid pulling in
       // old-year deals for companies already resolved via instanceId search.
       const seenCompanyNorms = new Set(
         currentDeals.map((d: any) => normName(extractCompany(d.properties?.dealname ?? "")))
       );
       const mopUpByCompany = new Map<string, any>(); // normName → best deal
-      for (const d of startDateDeals) {
+      const mopUpSources = [
+        ...startDateDeals,
+        ...startMonthDeals.filter((d: any) => {
+          const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
+          return ssd > 0 && ssd < renewalStartMs;
+        }),
+      ];
+      for (const d of mopUpSources) {
         if (seenIds.has(d.id)) continue;
         const name = d.properties?.dealname ?? "";
         if (!name.includes("MSI") || /extension/i.test(name)) continue;
@@ -660,8 +682,15 @@ export async function GET(req: NextRequest) {
         nocInstanceId != null ? (csaIdMap.get(nocInstanceId) ?? null) : null;
       const csaRounded: number | null =
         csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
+      // csaInstanceName: the canonical CSA name for this deal's company.
+      // Primary: dealCSANameMap — set directly from the CSA matching result, so it's
+      //   reliable even when the MSI deal and CSA instance use different names
+      //   (e.g. "Bartlett Electric Cooperative" deal → "BEC Communication" CSA instance).
+      // Fallback: noc_instance_id → instanceNameByIdMap — works when the company object
+      //   has noc_instance_id set but the deal wasn't matched through CSA (mop-up path).
       const csaInstanceName: string | null =
-        nocInstanceId != null ? (instanceNameByIdMap.get(nocInstanceId) ?? null) : null;
+        dealCSANameMap.get(deal.id) ??
+        (nocInstanceId != null ? (instanceNameByIdMap.get(nocInstanceId) ?? null) : null);
 
       // Renewal count = max(order form, CSA rounded, current year license).
       // Order form sets the contracted floor, but if actual usage (CSA rounded)

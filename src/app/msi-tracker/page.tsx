@@ -852,7 +852,18 @@ export default function MSITrackerPage() {
     persistCancelledId(entry.expirationDate, entry.currentDealId, entry.company);
     setDeals((prev) =>
       prev.map((d) =>
-        d.currentDealId === entry.currentDealId ? { ...d, cancelled: true } : d
+        d.currentDealId === entry.currentDealId
+          ? {
+              ...d,
+              cancelled: true,
+              // Mirror the "Did not renew" prepend locally so that if the user
+              // somehow triggers cancel again in this session the idempotency
+              // check in cancel/route.ts sees the updated html and skips Step 1.
+              m1NoteHtml: d.m1NoteHtml
+                ? `<p><strong>Did not renew</strong></p>\n${d.m1NoteHtml}`
+                : d.m1NoteHtml,
+            }
+          : d
       )
     );
     setCancelEntry(null);

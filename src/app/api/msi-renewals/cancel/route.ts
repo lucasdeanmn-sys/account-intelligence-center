@@ -13,36 +13,30 @@ export async function POST(req: NextRequest) {
     let noteError: string | null = null;
     let sheetError: string | null = null;
 
-    // 1. Stamp "Did not renew" onto the deal in HubSpot so the server-side
-    //    cancelled detection (rawNotes.some("Did not renew")) works on every
-    //    subsequent report run — no reliance on localStorage.
-    //
-    //    Strategy:
-    //    Case A: deal has an M1 note → prepend the marker to that note.
-    //    Case B: M1 note update fails OR no M1 note at all → create a direct
-    //            deal note so the server can always detect it via the v4
-    //            associations endpoint (avoids batch/read cache issues with the
-    //            M1 note and covers auto-renew deals with no M1 note at all).
-    let m1NoteUpdated = false;
+    // Step 1 (best-effort display): Prepend "Did not renew" to the M1 note so
+    // it is visible when a rep opens the deal in HubSpot.  This uses PATCH on
+    // the existing note, which HubSpot's batch/read endpoint may cache — so it
+    // is NOT the primary signal for server-side cancelled detection.
     if (m1NoteId && m1NoteHtml != null && !m1NoteHtml.includes("Did not renew")) {
-      // Case A: update existing M1 note
-      const prepended =
-        `<p><strong>Did not renew</strong></p>\n` + m1NoteHtml;
-      await updateNoteBody(m1NoteId, prepended)
-        .then(() => { m1NoteUpdated = true; })
-        .catch((e) => {
-          console.warn("Cancel note update failed:", e.message);
-          noteError = e.message;
-        });
-    } else if (m1NoteHtml?.includes("Did not renew")) {
-      // Already stamped (idempotent — treat as success)
-      m1NoteUpdated = true;
+      const prepended = `<p><strong>Did not renew</strong></p>\n` + m1NoteHtml;
+      await updateNoteBody(m1NoteId, prepended).catch((e) => {
+        console.warn("Cancel note update failed:", e.message);
+        noteError = e.message;
+      });
     }
 
-    if (!m1NoteUpdated && currentDealId) {
-      // Case B: M1 update failed or no M1 note — create a standalone note
-      // directly on the deal so the server can reliably detect "Did not renew"
-      // via direct v4 associations on the next run.
+    // Step 2 (primary detection signal): ALWAYS create a fresh direct deal note.
+    //
+    // Why: HubSpot's /crm/v3/objects/notes/batch/read endpoint caches note body
+    // content after a PATCH update and can return stale data for minutes.  That
+    // causes Step 1's change to be invisible to getDealNotes on subsequent runs,
+    // so the server returns cancelled: false even when the M1 note already says
+    // "Did not renew" — which triggers another prepend, producing duplicates.
+    //
+    // A freshly-created note has no prior cached version and is immediately
+    // readable via the v4 associations endpoint, so cancelled detection is
+    // reliable on every run regardless of caching.
+    if (currentDealId) {
       await createDealNote(
         currentDealId,
         "<p><strong>Did not renew</strong></p>"
