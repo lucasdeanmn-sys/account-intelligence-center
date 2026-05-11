@@ -408,9 +408,20 @@ export async function getDealCompanyNocIds(
   return result;
 }
 
-// Returns the set of company names (lowercase) that currently have an active
-// MSI extension deal — used to annotate renewal entries with hasExtension.
-/** Returns a map from lowercase company name → extension label(s), e.g.
+// Normalise a company name for extension lookups: lowercase, trim, strip common
+// legal suffixes so "BEC Communication, LLC" and "BEC Communication" both map
+// to the same key.
+export function normExtCo(s: string): string {
+  return s.toLowerCase().trim()
+    .replace(/[,.]?\s*(llc|inc|co|corp|ltd)\.?\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Returns a map from normalised company name → extension label(s).
+// Each extension deal is stored under BOTH the exact lowercase key AND the
+// normalised key so callers can look up with either form.
+/** Returns a map from lowercase (optionally normalised) company name → extension label(s), e.g.
  *  "henderson municipal" → ["POM", "Fiber Clarity"]
  */
 export async function getActiveExtensionCompanies(): Promise<Map<string, string[]>> {
@@ -424,17 +435,26 @@ export async function getActiveExtensionCompanies(): Promise<Map<string, string[
   ).catch(() => []);
 
   const companies = new Map<string, string[]>();
+
+  function addEntry(key: string, extName: string) {
+    const existing = companies.get(key) ?? [];
+    if (!existing.includes(extName)) existing.push(extName);
+    companies.set(key, existing);
+  }
+
   for (const deal of deals) {
     // Skip if the extension term has already been terminated
     if (deal.properties?.service_terminated) continue;
     const name: string = deal.properties?.dealname ?? "";
     const idx = name.indexOf(" (MSI");
     if (idx <= 0) continue;
-    const key = name.slice(0, idx).trim().toLowerCase();
+    const raw = name.slice(0, idx).trim();
     const extName = extractExtensionName(name);
-    const existing = companies.get(key) ?? [];
-    if (!existing.includes(extName)) existing.push(extName);
-    companies.set(key, existing);
+    // Store under exact lowercase key AND normalised key (deduped)
+    const exactKey = raw.toLowerCase();
+    const normKey  = normExtCo(raw);
+    addEntry(exactKey, extName);
+    if (normKey !== exactKey) addEntry(normKey, extName);
   }
   return companies;
 }

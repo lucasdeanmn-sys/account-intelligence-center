@@ -17,26 +17,38 @@ export async function POST(req: NextRequest) {
     //    cancelled detection (rawNotes.some("Did not renew")) works on every
     //    subsequent report run — no reliance on localStorage.
     //
+    //    Strategy:
     //    Case A: deal has an M1 note → prepend the marker to that note.
-    //    Case B: no M1 note (e.g. auto-renew like Vexus) → create a new note.
-    //    Guard against duplicates in both cases.
+    //    Case B: M1 note update fails OR no M1 note at all → create a direct
+    //            deal note so the server can always detect it via the v4
+    //            associations endpoint (avoids batch/read cache issues with the
+    //            M1 note and covers auto-renew deals with no M1 note at all).
+    let m1NoteUpdated = false;
     if (m1NoteId && m1NoteHtml != null && !m1NoteHtml.includes("Did not renew")) {
       // Case A: update existing M1 note
       const prepended =
         `<p><strong>Did not renew</strong></p>\n` + m1NoteHtml;
-      await updateNoteBody(m1NoteId, prepended).catch((e) => {
-        console.warn("Cancel note update failed:", e.message);
-        noteError = e.message;
-      });
-    } else if (!m1NoteId && currentDealId) {
-      // Case B: no M1 note — create a standalone cancellation note so the
-      //         server can detect "Did not renew" on re-run without localStorage.
+      await updateNoteBody(m1NoteId, prepended)
+        .then(() => { m1NoteUpdated = true; })
+        .catch((e) => {
+          console.warn("Cancel note update failed:", e.message);
+          noteError = e.message;
+        });
+    } else if (m1NoteHtml?.includes("Did not renew")) {
+      // Already stamped (idempotent — treat as success)
+      m1NoteUpdated = true;
+    }
+
+    if (!m1NoteUpdated && currentDealId) {
+      // Case B: M1 update failed or no M1 note — create a standalone note
+      // directly on the deal so the server can reliably detect "Did not renew"
+      // via direct v4 associations on the next run.
       await createDealNote(
         currentDealId,
         "<p><strong>Did not renew</strong></p>"
       ).catch((e) => {
-        console.warn("Cancel note creation failed:", e.message);
-        noteError = e.message;
+        console.warn("Cancel standalone note creation failed:", e.message);
+        if (!noteError) noteError = e.message;
       });
     }
 

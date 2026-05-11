@@ -30,11 +30,12 @@ export async function POST(req: NextRequest) {
       const note = d.sheetNote
         ? d.sheetNote.replace(/\s+on existing M1 agreement$/i, "")
         : null;
-      const notePart = note ? ` (${note})` : "";
-      const mainLine = `• ${d.company} — ${count}${notePart}`;
-      // Extensions as indented sub-bullets
-      const extLines = (d.extensionNames ?? []).map((e) => `  • ${e}`);
-      return [mainLine, ...extLines].join("\n");
+      // Combine note + extension names into a single parenthetical so the line
+      // stays on one row — Gmail strips leading-space indentation when converting
+      // plain text to HTML, making separate sub-bullet lines merge into the main.
+      const parts = [note, ...(d.extensionNames ?? [])].filter(Boolean);
+      const notePart = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+      return `• ${d.company} — ${count}${notePart}`;
     };
 
     const subject = `MSI ${monthLabel} Renewal`;

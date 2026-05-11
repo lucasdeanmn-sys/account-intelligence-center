@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
@@ -674,7 +674,17 @@ export async function GET(req: NextRequest) {
       const renewalDealName = `${company} (MSI - Year ${nextMsiYear ?? "?"})`;
 
       const dealName = deal.properties?.dealname ?? "";
-      const extensionNames = extensionCompanies.get(company.toLowerCase()) ?? [];
+      // Extension lookup: try exact company name, then normalised form, then CSA
+      // instance name (handles cases like MSI deal "Bartlett Electric Cooperative"
+      // vs extension deal "BEC Communication" — the CSA name bridges the gap).
+      const extensionNames: string[] =
+        extensionCompanies.get(company.toLowerCase()) ??
+        extensionCompanies.get(normExtCo(company)) ??
+        (csaInstanceName
+          ? (extensionCompanies.get(csaInstanceName.toLowerCase()) ??
+             extensionCompanies.get(normExtCo(csaInstanceName)))
+          : undefined) ??
+        [];
       const hasExtension = extensionNames.length > 0;
 
       // A deal is considered processed if:
