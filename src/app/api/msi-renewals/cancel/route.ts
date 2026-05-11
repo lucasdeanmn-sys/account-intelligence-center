@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateNoteBody, createDealNote } from "@/lib/hubspot";
+import { updateNoteBody, createDealNote, createCompanyNote, getDealCompanyId } from "@/lib/hubspot";
 import { cancelRenewalRow } from "@/lib/sheets";
 import { googleConfigured } from "@/lib/google";
 
@@ -25,28 +25,45 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Step 2 (primary detection signal): ALWAYS create a fresh direct deal note.
-    //
-    // Why: HubSpot's /crm/v3/objects/notes/batch/read endpoint caches note body
-    // content after a PATCH update and can return stale data for minutes.  That
-    // causes Step 1's change to be invisible to getDealNotes on subsequent runs,
-    // so the server returns cancelled: false even when the M1 note already says
-    // "Did not renew" — which triggers another prepend, producing duplicates.
-    //
-    // A freshly-created note has no prior cached version and is immediately
-    // readable via the v4 associations endpoint, so cancelled detection is
-    // reliable on every run regardless of caching.
+    // Step 2: Create a fresh direct DEAL note.
+    // A newly-created note has no cached content, so it is immediately visible
+    // via the v4 associations endpoint on the next report run.  Covers the common
+    // case where the same deal is matched on every run.
     if (currentDealId) {
       await createDealNote(
         currentDealId,
         "<p><strong>Did not renew</strong></p>"
       ).catch((e) => {
-        console.warn("Cancel standalone note creation failed:", e.message);
+        console.warn("Cancel deal note creation failed:", e.message);
         if (!noteError) noteError = e.message;
       });
     }
 
-    // 2. Highlight the row red on the Google Sheet
+    // Step 3 (most reliable — handles renamed/rebranded companies): Create a fresh
+    // note directly on the COMPANY object, tagged with the expiration date.
+    //
+    // Why: getDealNotes fetches both direct deal notes AND company notes (via
+    // getCompanyNotesForDeal).  Company notes are found for ANY deal associated
+    // with the company — so even if the algorithm picks a different deal on a future
+    // run (e.g. "NTS Communications (MSI Year 3)" vs "Vexus Fiber (MSI Year 4)",
+    // same company, different deal names), the cancel stamp is always detected.
+    //
+    // The expirationDate tag ("Did not renew — YYYY-MM-DD") prevents this note
+    // from incorrectly flagging the company as cancelled in a future report period
+    // if they renew under a new agreement.
+    if (currentDealId && expirationDate) {
+      const companyId = await getDealCompanyId(currentDealId).catch(() => null);
+      if (companyId) {
+        await createCompanyNote(
+          companyId,
+          `<p><strong>Did not renew — ${expirationDate}</strong></p>`
+        ).catch((e) => {
+          console.warn("Cancel company note creation failed:", e.message);
+        });
+      }
+    }
+
+    // Highlight the row red on the Google Sheet
     if (googleConfigured() && company && expirationDate) {
       const monthLabel = new Date(
         expirationDate + "T00:00:00.000Z"

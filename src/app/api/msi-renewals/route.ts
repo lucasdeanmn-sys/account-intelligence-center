@@ -766,13 +766,26 @@ export async function GET(req: NextRequest) {
 
       const multiTenant = nocInstanceId != null && multiTenantIds.has(nocInstanceId);
 
-      // Detect cancellation: the cancel route prepends "Did not renew" to the M1 note.
-      // Check the raw notes (not just the parsed M1 note) so we catch it even when
-      // the note isn't the primary M1 note selected by parseM1Note.
+      // Detect cancellation.  Three note types are checked, in decreasing reliability:
+      //
+      //  1. Company note tagged with this expiration date ("Did not renew — YYYY-MM-DD"):
+      //     Created by Step 3 of the cancel route.  Found via getCompanyNotesForDeal for
+      //     ANY deal associated with the company, so it survives deal-ID changes caused
+      //     by company renames (e.g. NTS Communications → Vexus Fiber).  The date tag
+      //     prevents false positives if the company renews again in a future period.
+      //
+      //  2. Plain "Did not renew" (no date tag):
+      //     Legacy — M1 note prepends (Step 1) and pre-date-tag standalone deal notes
+      //     (Step 2 before the date tag was added).  Still checked for backward compat.
+      //
+      // Both are fresh notes (POST, not PATCH), so batch/read returns their content
+      // immediately — no HubSpot caching issue.
       const rawNotes = notesAndItems.find((n) => n.dealId === deal.id)?.notes ?? [];
-      const cancelled = rawNotes.some((n: any) =>
-        (n.properties?.hs_note_body ?? "").includes("Did not renew")
-      );
+      const cancelled = rawNotes.some((n: any) => {
+        const body: string = n.properties?.hs_note_body ?? "";
+        if (body.includes(`Did not renew — ${expirationDate}`)) return true;  // dated company note
+        return body.includes("Did not renew");                                 // legacy format
+      });
 
       return {
         currentDealId: deal.id,

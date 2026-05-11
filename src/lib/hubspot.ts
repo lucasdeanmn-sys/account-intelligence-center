@@ -194,6 +194,22 @@ export async function createDealNote(dealId: string, htmlBody: string): Promise<
   await associate("notes", note.id, "deals", dealId);
 }
 
+/** Create a note directly on a company object.
+ *  Used by the cancel route as the primary detection signal: company notes are
+ *  returned by getCompanyNotesForDeal for ANY deal associated with the company,
+ *  so cancelled detection works even when the algorithm picks a different deal
+ *  between runs (e.g. a company with two MSI deals under different names such
+ *  as "NTS Communications" and "Vexus Fiber"). */
+export async function createCompanyNote(companyId: string, htmlBody: string): Promise<void> {
+  const note = await hs("POST", "/crm/v3/objects/notes", {
+    properties: {
+      hs_note_body: htmlBody,
+      hs_timestamp: new Date().toISOString(),
+    },
+  });
+  await associate("notes", note.id, "companies", companyId);
+}
+
 export async function createTask(
   dealId: string,
   subject: string,
