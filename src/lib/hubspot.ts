@@ -1,5 +1,11 @@
 const BASE = "https://api.hubapi.com";
 
+// Sentinel value stored in service_terminated when a renewal is marked
+// "Did Not Renew".  Chosen as a timestamp clearly before the MSI program
+// existed (2000-01-01 UTC) so it can be distinguished from a real
+// termination date set by the process route (~2025+ timestamps).
+export const CANCEL_SENTINEL = "946684800000";
+
 function token() {
   const t = process.env.HUBSPOT_ACCESS_TOKEN;
   if (!t) throw new Error("HUBSPOT_ACCESS_TOKEN not configured");

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateNoteBody, createDealNote, createCompanyNote, getDealCompanyId } from "@/lib/hubspot";
+import { updateNoteBody, createDealNote, createCompanyNote, getDealCompanyId, updateDealProperties, CANCEL_SENTINEL } from "@/lib/hubspot";
 import { cancelRenewalRow } from "@/lib/sheets";
 import { googleConfigured } from "@/lib/google";
 
@@ -62,6 +62,20 @@ export async function POST(req: NextRequest) {
           console.warn("Cancel company note creation failed:", e.message);
         });
       }
+    }
+
+    // Step 4 (most reliable — survives URL/session changes, no notes needed):
+    // Stamp service_terminated on the current deal with the cancel sentinel.
+    // The report route already fetches service_terminated for every deal in the
+    // initial batch query, so detection is free and works on every run without
+    // any extra API calls or note-fetching.
+    if (currentDealId) {
+      await updateDealProperties(currentDealId, {
+        service_terminated: CANCEL_SENTINEL,
+      }).catch((e) => {
+        console.warn("Cancel sentinel property set failed:", e.message);
+        if (!noteError) noteError = e.message;
+      });
     }
 
     // Highlight the row red on the Google Sheet

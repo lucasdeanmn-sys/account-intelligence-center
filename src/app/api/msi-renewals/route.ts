@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL } from "@/lib/hubspot";
 import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
@@ -745,47 +745,45 @@ export async function GET(req: NextRequest) {
         [];
       const hasExtension = extensionNames.length > 0;
 
-      // A deal is considered processed if:
-      //   (a) a renewal deal exists in a "Ready for Billing" / "Invoiced" stage, OR
-      //   (b) service_terminated is set on the current deal (set by the process route).
-      //
-      // For (b) we check two sources in order:
-      //   1. freshSvcTermMap — populated from getDealsByIds (batch/read, bypasses
-      //      search-index lag, best for deals processed moments ago)
-      //   2. deal.properties.service_terminated — the value already returned by the
-      //      initial getMsiDealsByStartDate search (reliable once the index catches up,
-      //      and a safe fallback if getDealsByIds fails silently)
+      // svcTerminated: check freshSvcTermMap first (batch/read, no search-index lag),
+      // then the property from the initial search query as a fallback.
       const renewalStage: string = renewalDeal?.properties?.dealstage ?? "";
       const svcTerminated =
         freshSvcTermMap.get(deal.id) ??
         (deal.properties?.service_terminated || null);
-      const processed = !!(
-        (renewalDeal && renewalStage && processedStageIds.has(renewalStage)) ||
-        svcTerminated
-      );
 
       const multiTenant = nocInstanceId != null && multiTenantIds.has(nocInstanceId);
 
-      // Detect cancellation.  Three note types are checked, in decreasing reliability:
+      // Detect cancellation.  Three signals checked in decreasing reliability:
       //
-      //  1. Company note tagged with this expiration date ("Did not renew — YYYY-MM-DD"):
-      //     Created by Step 3 of the cancel route.  Found via getCompanyNotesForDeal for
-      //     ANY deal associated with the company, so it survives deal-ID changes caused
-      //     by company renames (e.g. NTS Communications → Vexus Fiber).  The date tag
-      //     prevents false positives if the company renews again in a future period.
+      //  1. service_terminated === CANCEL_SENTINEL (most reliable):
+      //     Set directly on the deal by Step 4 of the cancel route.  Already
+      //     fetched in the initial batch query — no extra API call needed, works
+      //     across sessions and Vercel preview-URL changes.
       //
-      //  2. Plain "Did not renew" (no date tag):
-      //     Legacy — M1 note prepends (Step 1) and pre-date-tag standalone deal notes
-      //     (Step 2 before the date tag was added).  Still checked for backward compat.
+      //  2. Company note tagged with this expiration date ("Did not renew — YYYY-MM-DD"):
+      //     Created by Step 3 of the cancel route.  Found via getCompanyNotesForDeal
+      //     for ANY deal associated with the company — survives deal-ID changes.
+      //     The date tag prevents false positives in future renewal periods.
       //
-      // Both are fresh notes (POST, not PATCH), so batch/read returns their content
-      // immediately — no HubSpot caching issue.
+      //  3. Plain "Did not renew" (no date tag):
+      //     Legacy — M1 note prepends (Step 1) and pre-date-tag standalone deal notes.
+      //     Still checked for backward compatibility.
       const rawNotes = notesAndItems.find((n) => n.dealId === deal.id)?.notes ?? [];
-      const cancelled = rawNotes.some((n: any) => {
-        const body: string = n.properties?.hs_note_body ?? "";
-        if (body.includes(`Did not renew — ${expirationDate}`)) return true;  // dated company note
-        return body.includes("Did not renew");                                 // legacy format
-      });
+      const cancelled =
+        svcTerminated === CANCEL_SENTINEL ||
+        rawNotes.some((n: any) => {
+          const body: string = n.properties?.hs_note_body ?? "";
+          if (body.includes(`Did not renew — ${expirationDate}`)) return true;
+          return body.includes("Did not renew");
+        });
+
+      // processed: only if not cancelled, and either a billing-stage renewal deal
+      // exists OR service_terminated is a real date (not the cancel sentinel).
+      const processed = !cancelled && !!(
+        (renewalDeal && renewalStage && processedStageIds.has(renewalStage)) ||
+        (svcTerminated && svcTerminated !== CANCEL_SENTINEL)
+      );
 
       return {
         currentDealId: deal.id,
