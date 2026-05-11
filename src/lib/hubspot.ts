@@ -426,6 +426,11 @@ export interface ExtensionIndex {
    *  even when the two deals use different company name prefixes (e.g.
    *  "Bartlett Electric Cooperative" MSI vs "BEC Communication" extension). */
   byNocId: Map<number, string[]>;
+  /** Extension deals whose noc_instance_id lookup is deferred so the main
+   *  route can batch them together with the MSI deal company lookups in a
+   *  single getDealCompanyNocIds call — avoids a separate lookup that can
+   *  silently fail under HubSpot rate-limiting during the parallel fetch. */
+  pendingNocLookup: Array<{ dealId: string; extName: string }>;
 }
 
 /** Fetch all active MSI extension deals and index them by both name and
@@ -467,23 +472,12 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
     active.push({ dealId: deal.id, extName });
   }
 
-  // Cross-index by noc_instance_id so the route can match via the shared
-  // HubSpot company object even when names differ.
-  if (active.length) {
-    const nocIdMap = await getDealCompanyNocIds(active.map((a) => a.dealId)).catch(() =>
-      new Map<string, number | null>()
-    );
-    for (const { dealId, extName } of active) {
-      const nid = nocIdMap.get(dealId);
-      if (nid != null) {
-        const existing = byNocId.get(nid) ?? [];
-        if (!existing.includes(extName)) existing.push(extName);
-        byNocId.set(nid, existing);
-      }
-    }
-  }
-
-  return { byName, byNocId };
+  // Defer the noc_instance_id lookups for extension deals.
+  // The main route will include these deal IDs in its own getDealCompanyNocIds
+  // call (which already fetches company IDs for MSI deals), so both sets are
+  // resolved in one combined API batch instead of two separate calls that can
+  // silently fail under HubSpot rate-limiting during the parallel fetch phase.
+  return { byName, byNocId, pendingNocLookup: active };
 }
 
 export async function getMsiDealsByStartDate(

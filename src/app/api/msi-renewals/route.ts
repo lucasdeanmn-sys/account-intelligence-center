@@ -333,7 +333,7 @@ export async function GET(req: NextRequest) {
         console.error("CSA fetch error (non-fatal):", err.message);
         return null;
       }),
-      getActiveExtensionCompanies().catch((): ExtensionIndex => ({ byName: new Map(), byNocId: new Map() })),
+      getActiveExtensionCompanies().catch((): ExtensionIndex => ({ byName: new Map(), byNocId: new Map(), pendingNocLookup: [] })),
       getProcessedStageIds().catch(() => new Set<string>()),
     ]);
 
@@ -615,12 +615,37 @@ export async function GET(req: NextRequest) {
     // Fetch notes, company noc_instance_ids, and fresh deal properties in parallel.
     // getDealsByIds uses the batch/read endpoint (not search) so it bypasses HubSpot's
     // search-index lag — important for detecting service_terminated set moments ago.
+    //
+    // noc_instance_id lookup: combine MSI deal IDs + extension deal IDs into a single
+    // getDealCompanyNocIds call.  Extension deals were deferred by getActiveExtensionCompanies
+    // (pendingNocLookup) precisely so they can piggyback here instead of running as a
+    // separate call during the parallel fetch phase (where HubSpot rate-limiting can
+    // silently drop individual association lookups, leaving byNocId empty for some companies).
     const filteredIds = filtered.map((d: any) => d.id);
-    const [notesAndItems, nocIdMap, freshDeals] = await Promise.all([
+    const extPending = extensionIndex.pendingNocLookup ?? [];
+    const nocLookupIds = extPending.length
+      ? [...filteredIds, ...extPending.map((e) => e.dealId)]
+      : filteredIds;
+
+    const [notesAndItems, allNocIds, freshDeals] = await Promise.all([
       fetchNotesBatched(filtered),
-      getDealCompanyNocIds(filteredIds),
+      getDealCompanyNocIds(nocLookupIds),
       getDealsByIds(filteredIds, ["service_terminated"]).catch(() => []),
     ]);
+
+    // Split allNocIds: MSI deals → nocIdMap, extension deals → populate byNocId
+    const nocIdMap = new Map<string, number | null>();
+    for (const id of filteredIds) {
+      nocIdMap.set(id, allNocIds.get(id) ?? null);
+    }
+    for (const { dealId, extName } of extPending) {
+      const nid = allNocIds.get(dealId);
+      if (nid != null) {
+        const existing = extensionIndex.byNocId.get(nid) ?? [];
+        if (!existing.includes(extName)) existing.push(extName);
+        extensionIndex.byNocId.set(nid, existing);
+      }
+    }
 
     // Build a map from deal ID → fresh service_terminated value
     const freshSvcTermMap = new Map<string, string>();
