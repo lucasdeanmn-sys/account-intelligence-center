@@ -29,6 +29,12 @@ const cancelledCoKey = (expirationDate: string) => `msi_cancelled_co_${expiratio
 // the company object, not the deal.  Survives deal-name changes (NTS→Vexus) and
 // any deal-ID churn between report runs.
 const cancelledNocKey = (expirationDate: string) => `msi_cancelled_noc_${expirationDate}`;
+// Quaternary key stores CSA instance names — authoritative name from the external
+// CSA system, independent of HubSpot deal/company naming.
+const cancelledCsaKey = (expirationDate: string) => `msi_cancelled_csa_${expirationDate}`;
+// Quinary key stores HubSpot company object IDs — the most stable HubSpot
+// identifier (never changes even through renames), returned by the cancel route.
+const cancelledCoIdKey = (expirationDate: string) => `msi_cancelled_coid_${expirationDate}`;
 
 // ─── Confirmation Modal ───────────────────────────────────────────────────────
 
@@ -700,17 +706,48 @@ export default function MSITrackerPage() {
       return new Set<string>(stored);
     } catch { return new Set<string>(); }
   }
-  function persistCancelledId(expDate: string, dealId: string, company: string, nocId?: number | null) {
+  function loadCancelledCsaNames(expDate: string) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(cancelledCsaKey(expDate)) ?? "[]");
+      return new Set<string>(stored);
+    } catch { return new Set<string>(); }
+  }
+  function loadCancelledCoIds(expDate: string) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(cancelledCoIdKey(expDate)) ?? "[]");
+      return new Set<string>(stored);
+    } catch { return new Set<string>(); }
+  }
+  function persistCancelledId(
+    expDate: string,
+    dealId: string,
+    company: string,
+    nocId?: number | null,
+    csaName?: string | null,
+    hsCompanyId?: string | null,
+  ) {
     const ids = loadCancelledIds(expDate);
     ids.add(dealId);
     localStorage.setItem(cancelledKey(expDate), JSON.stringify(Array.from(ids)));
+
     const cos = loadCancelledCompanies(expDate);
     cos.add(company.trim().toLowerCase());
     localStorage.setItem(cancelledCoKey(expDate), JSON.stringify(Array.from(cos)));
+
     if (nocId != null) {
       const nocs = loadCancelledNocIds(expDate);
       nocs.add(String(nocId));
       localStorage.setItem(cancelledNocKey(expDate), JSON.stringify(Array.from(nocs)));
+    }
+    if (csaName) {
+      const csas = loadCancelledCsaNames(expDate);
+      csas.add(csaName.trim().toLowerCase());
+      localStorage.setItem(cancelledCsaKey(expDate), JSON.stringify(Array.from(csas)));
+    }
+    if (hsCompanyId) {
+      const coids = loadCancelledCoIds(expDate);
+      coids.add(hsCompanyId);
+      localStorage.setItem(cancelledCoIdKey(expDate), JSON.stringify(Array.from(coids)));
     }
     setCancelledIds(new Set(ids));
   }
@@ -787,21 +824,25 @@ export default function MSITrackerPage() {
       });
 
       // Merge locally-persisted cancellations.
-      // Three parallel keys for maximum resilience:
-      //   1. deal IDs   — fast exact match, but may change if algorithm picks different deal
-      //   2. company names — survives deal-ID changes between runs
-      //   3. noc_instance_id — most stable: lives on the company object, never changes
-      //      even if the deal is renamed (NTS Communications → Vexus Fiber, same company)
-      const storedCancelled = loadCancelledIds(data.expirationDate ?? "");
-      const storedCancelledCos = loadCancelledCompanies(data.expirationDate ?? "");
-      const storedCancelledNocs = loadCancelledNocIds(data.expirationDate ?? "");
+      // Five parallel keys for maximum resilience:
+      //   1. deal IDs          — fast exact match, but may change between runs
+      //   2. company names     — survives deal-ID changes
+      //   3. noc_instance_id   — company-object property, survives deal renames
+      //   4. CSA instance name — from external CSA system, independent of HubSpot naming
+      //   5. HubSpot company object ID — stored from cancel response, never changes
+      const expDate = data.expirationDate ?? "";
+      const storedCancelled    = loadCancelledIds(expDate);
+      const storedCancelledCos = loadCancelledCompanies(expDate);
+      const storedCancelledNocs = loadCancelledNocIds(expDate);
+      const storedCancelledCsas = loadCancelledCsaNames(expDate);
       setCancelledIds(storedCancelled);
       setDeals(deals.map((d) => {
         if (d.cancelled) return d; // server already detected it — trust that
-        const byId = storedCancelled.has(d.currentDealId);
-        const byCo = storedCancelledCos.has(d.company.trim().toLowerCase());
+        const byId  = storedCancelled.has(d.currentDealId);
+        const byCo  = storedCancelledCos.has(d.company.trim().toLowerCase());
         const byNoc = d.nocInstanceId != null && storedCancelledNocs.has(String(d.nocInstanceId));
-        return byId || byCo || byNoc ? { ...d, cancelled: true } : d;
+        const byCSA = d.csaInstanceName != null && storedCancelledCsas.has(d.csaInstanceName.trim().toLowerCase());
+        return byId || byCo || byNoc || byCSA ? { ...d, cancelled: true } : d;
       }));
     } catch (e: any) {
       setError(e.message || "Failed to load renewal data");
@@ -869,7 +910,14 @@ export default function MSITrackerPage() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Cancel failed");
-    persistCancelledId(entry.expirationDate, entry.currentDealId, entry.company, entry.nocInstanceId);
+    persistCancelledId(
+      entry.expirationDate,
+      entry.currentDealId,
+      entry.company,
+      entry.nocInstanceId,
+      entry.csaInstanceName ?? null,
+      data.companyId ?? null,
+    );
     setDeals((prev) =>
       prev.map((d) =>
         d.currentDealId === entry.currentDealId

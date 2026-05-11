@@ -12,6 +12,7 @@ export async function POST(req: NextRequest) {
 
     let noteError: string | null = null;
     let sheetError: string | null = null;
+    let companyId: string | null = null;
 
     // Step 1 (best-effort display): Prepend "Did not renew" to the M1 note so
     // it is visible when a rep opens the deal in HubSpot.  This uses PATCH on
@@ -52,7 +53,7 @@ export async function POST(req: NextRequest) {
     // from incorrectly flagging the company as cancelled in a future report period
     // if they renew under a new agreement.
     if (currentDealId && expirationDate) {
-      const companyId = await getDealCompanyId(currentDealId).catch(() => null);
+      companyId = await getDealCompanyId(currentDealId).catch(() => null);
       if (companyId) {
         await createCompanyNote(
           companyId,
@@ -80,7 +81,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({ success: true, noteError, sheetError });
+    return NextResponse.json({ success: true, noteError, sheetError, companyId: companyId ?? null });
   } catch (error: any) {
     console.error("MSI cancel error:", error);
     return NextResponse.json(
