@@ -750,6 +750,12 @@ export default function MSITrackerPage() {
       localStorage.setItem(cancelledCoIdKey(expDate), JSON.stringify(Array.from(coids)));
     }
     setCancelledIds(new Set(ids));
+    console.log("[MSI cancel] persisted for expDate:", expDate, {
+      dealId, company: company.trim().toLowerCase(),
+      nocId, csaName, hsCompanyId,
+      storedIds: Array.from(ids),
+      storedCos: Array.from(loadCancelledCompanies(expDate)),
+    });
   }
 
   function applyOverride(company: string, instanceName: string) {
@@ -835,6 +841,17 @@ export default function MSITrackerPage() {
       const storedCancelledCos = loadCancelledCompanies(expDate);
       const storedCancelledNocs = loadCancelledNocIds(expDate);
       const storedCancelledCsas = loadCancelledCsaNames(expDate);
+      console.log("[MSI runReport] expDate:", expDate, {
+        storedIds: Array.from(storedCancelled),
+        storedCos: Array.from(storedCancelledCos),
+        storedNocs: Array.from(storedCancelledNocs),
+        storedCsas: Array.from(storedCancelledCsas),
+        deals: deals.map((d) => ({
+          id: d.currentDealId, company: d.company,
+          csa: d.csaInstanceName, noc: d.nocInstanceId,
+          serverCancelled: d.cancelled,
+        })),
+      });
       setCancelledIds(storedCancelled);
       setDeals(deals.map((d) => {
         if (d.cancelled) return d; // server already detected it — trust that
