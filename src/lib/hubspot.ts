@@ -825,11 +825,13 @@ export async function cloneLineItemsToDeal(
         item.properties?.recurringbillingfrequency ?? "annually"
       );
     } else {
-      // Add-on line items — clone as-is
+      // Add-on line items — clone structure but use the same renewalCount so every
+      // line item on the renewal deal reflects the correct circuit count (max of
+      // order-form license and CSA rounded circuits).
       await createLineItem(
         targetDealId,
         item.properties?.name ?? "MSI Add-on",
-        parseInt(item.properties?.quantity ?? "1", 10),
+        renewalCount,
         item.properties?.price ?? null,
         null,
         item.properties?.hs_product_id ?? null,
