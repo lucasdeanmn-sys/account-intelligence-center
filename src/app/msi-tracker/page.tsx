@@ -556,13 +556,13 @@ function CsaMappingPanel({ deals, instances, overrides, onLink, onClear }: CsaMa
         Link each company to its CSA instance. Matches are saved and used on future fetches.
       </p>
 
-      {/* Hidden datalist for all instances */}
+      {/* Hidden datalist for all instances.
+          ID is shown first so typing a customer number filters to the right instance.
+          The value stays as instanceName so the link logic fires on selection. */}
       <datalist id="csa-instance-list">
         {sorted.map((i) => (
           <option key={i.instanceName} value={i.instanceName}>
-            {i.instanceName} · {i.circuits.toLocaleString()} circuits
-            {i.domain ? ` · ${i.domain}` : ""}
-            {i.instanceId ? ` · ID ${i.instanceId}` : ""}
+            {i.instanceId != null ? `${i.instanceId} · ` : ""}{i.instanceName} · {i.circuits.toLocaleString()} circuits{i.domain ? ` · ${i.domain}` : ""}
           </option>
         ))}
       </datalist>
@@ -603,9 +603,19 @@ function CsaMatchRow({ company, override, instances, onLink, onClear }: CsaMatch
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const val = e.target.value;
     setQuery(val);
-    // Auto-link if the typed value exactly matches an instance name
-    const match = instances.find((i) => i.instanceName === val);
-    if (match) onLink(company, val);
+    // Match by instance name (normal datalist selection)
+    let match = instances.find((i) => i.instanceName === val);
+    if (match) { onLink(company, val); return; }
+    // Match by instance ID — if the user types a raw number (the customer number
+    // from HubSpot), find the instance and swap the query to the name.
+    if (/^\d+$/.test(val.trim())) {
+      const numId = parseInt(val.trim(), 10);
+      match = instances.find((i) => i.instanceId === numId);
+      if (match) {
+        setQuery(match.instanceName);
+        onLink(company, match.instanceName);
+      }
+    }
   }
 
   function handleClear() {
