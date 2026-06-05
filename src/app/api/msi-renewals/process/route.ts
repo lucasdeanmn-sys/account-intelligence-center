@@ -4,7 +4,6 @@ import {
   getDealLineItems,
   updateLineItem,
   updateDealProperties,
-  getClosedWonStage,
   cloneLineItemsToDeal,
   getExtensionDealsForCompany,
   appendAutoRenewalEntry,
@@ -14,6 +13,8 @@ import {
   associateDealWithCompany,
   updateDealMrr,
   associateNoteWithDeal,
+  MSI_PIPELINE_ID,
+  MSI_STAGE_READY,
 } from "@/lib/hubspot";
 import { appendRenewalRow } from "@/lib/sheets";
 import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
@@ -51,10 +52,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Resolve the pipeline stage ("Closed Won - Ready for Billing") and fetch
-    //    current deal's custom fields + company association in parallel.
-    const [stage, currentCustomFields, currentCompanyId] = await Promise.all([
-      getClosedWonStage("renewal").catch(() => null),
+    // 1. Use hardcoded pipeline/stage IDs for "Software - Renewals" /
+    //    "Closed Won - Ready for Billing".  Dynamic lookup via getClosedWonStage
+    //    was unreliable — "Support - Renewal" appeared before "Software - Renewals"
+    //    in the HubSpot API response and was picked instead.
+    const stage = { pipelineId: MSI_PIPELINE_ID, stageId: MSI_STAGE_READY };
+    const [currentCustomFields, currentCompanyId] = await Promise.all([
       getDealCustomFields(currentDealId).catch(() => ({})),
       getDealCompanyId(currentDealId).catch(() => null),
     ]);

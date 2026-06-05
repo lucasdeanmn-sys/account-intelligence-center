@@ -6,6 +6,17 @@ const BASE = "https://api.hubapi.com";
 // termination date set by the process route (~2025+ timestamps).
 export const CANCEL_SENTINEL = "946684800000";
 
+// HubSpot pipeline and stage IDs for MSI renewals.
+// Hardcoded because the dynamic lookup (getClosedWonStage("renewal")) picks
+// "Support - Renewal" before "Software - Renewals" due to API ordering.
+// HubSpot never reassigns IDs, so these are permanent.
+//   Pipeline: Software - Renewals (ID 984885)
+//   Stage:    Closed Won - Ready for Billing (ID 157830253)
+//   Stage:    Closed Won - Invoiced          (ID 1072203278)
+export const MSI_PIPELINE_ID          = "984885";
+export const MSI_STAGE_READY          = "157830253";  // Closed Won - Ready for Billing
+export const MSI_STAGE_INVOICED       = "1072203278"; // Closed Won - Invoiced
+
 function token() {
   const t = process.env.HUBSPOT_ACCESS_TOKEN;
   if (!t) throw new Error("HUBSPOT_ACCESS_TOKEN not configured");
@@ -657,9 +668,11 @@ export async function updateDealProperties(dealId: string, properties: Record<st
 // processed — specifically any stage whose label contains "ready for billing"
 // or "invoiced" across all pipelines.
 export async function getProcessedStageIds(): Promise<Set<string>> {
+  // Always include the known MSI renewal stages so processed detection works
+  // even if the pipeline API call fails or returns unexpected data.
+  const ids = new Set<string>([MSI_STAGE_READY, MSI_STAGE_INVOICED]);
   const res = await hs("GET", "/crm/v3/pipelines/deals").catch(() => ({ results: [] }));
   const pipelines: any[] = res.results ?? [];
-  const ids = new Set<string>();
   for (const p of pipelines) {
     for (const s of (p.stages ?? []) as any[]) {
       const l: string = (s.label ?? "").toLowerCase();
