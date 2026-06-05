@@ -718,19 +718,32 @@ export async function GET(req: NextRequest) {
 
       // ID-based CSA match: noc_instance_id → CSA circuits + instance name
       const nocInstanceId = nocIdMap.get(deal.id) ?? null;
-      const csaCount: number | null =
+      const csaCountById: number | null =
         nocInstanceId != null ? (csaIdMap.get(nocInstanceId) ?? null) : null;
-      const csaRounded: number | null =
-        csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
-      // csaInstanceName: the canonical CSA name for this deal's company.
-      // Primary: dealCSANameMap — set directly from the CSA matching result, so it's
-      //   reliable even when the MSI deal and CSA instance use different names
-      //   (e.g. "Bartlett Electric Cooperative" deal → "BEC Communication" CSA instance).
-      // Fallback: noc_instance_id → instanceNameByIdMap — works when the company object
-      //   has noc_instance_id set but the deal wasn't matched through CSA (mop-up path).
-      const csaInstanceName: string | null =
+
+      // csaInstanceName must be resolved before the fallback so the name-based
+      // lookup can use it.  Compute it here; the comment block below explains it.
+      const csaInstanceNameRaw: string | null =
         dealCSANameMap.get(deal.id) ??
         (nocInstanceId != null ? (instanceNameByIdMap.get(nocInstanceId) ?? null) : null);
+
+      // Name-based fallback: when get_company calls time out the csaIdMap is empty,
+      // but csaResult.instances still has circuit counts from the snapshot.
+      // If ID lookup failed, match by instance name so counts still show up.
+      const csaCountByName: number | null = (() => {
+        if (csaCountById !== null || !csaResult) return null;
+        const needle = csaInstanceNameRaw ?? company;
+        const inst = csaResult.instances.find(
+          (i) => companyNamesMatch(i.instanceName, needle)
+        );
+        return inst?.circuits ?? null;
+      })();
+
+      const csaCount: number | null = csaCountById ?? csaCountByName;
+      const csaRounded: number | null =
+        csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
+      // csaInstanceName already computed above as csaInstanceNameRaw.
+      const csaInstanceName: string | null = csaInstanceNameRaw;
 
       // Renewal count = max(order form, CSA rounded, current year license).
       // Order form sets the contracted floor, but if actual usage (CSA rounded)
