@@ -295,8 +295,18 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
 
   // Fire all get_company calls in a single parallel batch — each has its own
   // 12-second timeout so a stalled connection doesn't block the others.
+  // The Railway server can be cold-started; a single retry on failure covers
+  // the warm-up window without blocking the whole request.
+  const callWithRetry = async (name: string) => {
+    try {
+      return await callMcp("get_company", { name }, 12_000);
+    } catch {
+      // Single retry with a longer timeout in case the server was waking up
+      return await callMcp("get_company", { name }, 20_000);
+    }
+  };
   const results = await Promise.allSettled(
-    targets.map((r) => callMcp("get_company", { name: r.instance }, 12_000))
+    targets.map((r) => callWithRetry(r.instance))
   );
 
   const resolvedInstances: CsaInstance[] = [];
