@@ -391,9 +391,10 @@ interface DealRowProps {
   entry: RenewalEntry;
   onProcess: (entry: RenewalEntry) => void;
   onCancel: (entry: RenewalEntry) => void;
+  onUnprocess: (entry: RenewalEntry) => void;
 }
 
-function DealRow({ entry, onProcess, onCancel }: DealRowProps) {
+function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
   const [showNote, setShowNote] = useState(false);
 
   const renewalHigher =
@@ -479,15 +480,25 @@ function DealRow({ entry, onProcess, onCancel }: DealRowProps) {
               Cancelled
             </span>
           ) : entry.processed ? (
-            <button
-              onClick={() => onProcess(entry)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-opacity hover:opacity-70"
-              style={{ backgroundColor: "#22c55e20", color: "#22c55e" }}
-              title="Re-process (safe to repeat)"
-            >
-              <CheckCircle size={12} />
-              Processed
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => onProcess(entry)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-opacity hover:opacity-70"
+                style={{ backgroundColor: "#22c55e20", color: "#22c55e" }}
+                title="Re-process (safe to repeat)"
+              >
+                <CheckCircle size={12} />
+                Processed
+              </button>
+              <button
+                onClick={() => onUnprocess(entry)}
+                className="p-1.5 rounded-lg transition-colors hover:opacity-70"
+                style={{ color: "#64748b" }}
+                title="Undo — clear processed state so this deal can be re-processed"
+              >
+                <RefreshCw size={13} />
+              </button>
+            </div>
           ) : (
             <>
               <button
@@ -922,6 +933,26 @@ export default function MSITrackerPage() {
     setConfirmEntry(null);
   }
 
+  async function handleUnprocess(entry: RenewalEntry) {
+    const res = await fetch("/api/msi-renewals/unprocess", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        currentDealId: entry.currentDealId,
+        renewalDealId: entry.renewalDealId ?? null,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Unprocess failed");
+    setDeals((prev) =>
+      prev.map((d) =>
+        d.currentDealId === entry.currentDealId
+          ? { ...d, processed: false }
+          : d
+      )
+    );
+  }
+
   async function handleCancel(entry: RenewalEntry) {
     const res = await fetch("/api/msi-renewals/cancel", {
       method: "POST",
@@ -1140,6 +1171,7 @@ export default function MSITrackerPage() {
             entry={entry}
             onProcess={(e) => setConfirmEntry(e)}
             onCancel={(e) => setCancelEntry(e)}
+            onUnprocess={handleUnprocess}
           />
         ))}
       </div>

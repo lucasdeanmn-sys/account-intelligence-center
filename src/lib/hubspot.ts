@@ -690,6 +690,34 @@ export async function getClosedWonStage(pipelineNameSubstring: string): Promise<
   return null;
 }
 
+// Return the first open (non-billing, non-closed) stage ID in the renewal pipeline.
+// Used by the unprocess route to roll a renewal deal back out of "Ready for Billing".
+export async function getFirstOpenStageId(pipelineNameSubstring: string): Promise<string | null> {
+  const res = await hs("GET", "/crm/v3/pipelines/deals").catch(() => ({ results: [] }));
+  const pipelines: any[] = res.results ?? [];
+
+  const isClosedOrBilling = (s: any) => {
+    const l = (s.label ?? "").toLowerCase();
+    return (
+      l.includes("billing") || l.includes("invoiced") ||
+      s.metadata?.isClosed === "true"
+    );
+  };
+
+  // Prefer the named pipeline, fall back to any pipeline
+  const named = pipelines.find((p: any) =>
+    p.label?.toLowerCase().includes(pipelineNameSubstring.toLowerCase())
+  );
+  const pipeline = named ?? pipelines[0];
+  if (!pipeline) return null;
+
+  const stages: any[] = [...(pipeline.stages ?? [])].sort(
+    (a: any, b: any) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)
+  );
+  const open = stages.find((s) => !isClosedOrBilling(s));
+  return open?.id ?? null;
+}
+
 export async function createMsiRenewalDeal(
   name: string,
   subscriptionStartDate: string,
