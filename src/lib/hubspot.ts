@@ -16,6 +16,7 @@ export const CANCEL_SENTINEL = "946684800000";
 export const MSI_PIPELINE_ID          = "984885";
 export const MSI_STAGE_READY          = "157830253";  // Closed Won - Ready for Billing
 export const MSI_STAGE_INVOICED       = "1072203278"; // Closed Won - Invoiced
+export const MSI_EXTENSION_PIPELINE_ID = "152877993"; // Extensions pipeline
 
 function token() {
   const t = process.env.HUBSPOT_ACCESS_TOKEN;
@@ -470,7 +471,11 @@ export interface ExtensionIndex {
  *  noc_instance_id so the route can find extensions regardless of whether
  *  the extension deal name prefix matches the MSI deal company name. */
 export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
-  const [deals, pipelineRes] = await Promise.all([
+  // Two searches in parallel:
+  //   1. Name-based: deals with "MSI" + "Extension" in the name (standard naming)
+  //   2. Pipeline-based: all MSI deals in the Extensions pipeline (catches deals
+  //      like "Cleveland Utilities (MSI - POM)" that omit the "Extension" keyword)
+  const [byNameDeals, byPipelineDeals, pipelineRes] = await Promise.all([
     searchDeals(
       [
         { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
@@ -479,8 +484,22 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
       ["dealname", "service_terminated", "dealstage"],
       200
     ).catch(() => []),
+    searchDeals(
+      [
+        { propertyName: "pipeline", operator: "EQ", value: MSI_EXTENSION_PIPELINE_ID },
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+      ],
+      ["dealname", "service_terminated", "dealstage", "pipeline"],
+      200
+    ).catch(() => []),
     hs("GET", "/crm/v3/pipelines/deals").catch(() => ({ results: [] })),
   ]);
+  // Merge and deduplicate by deal ID
+  const seenDealIds = new Set<string>();
+  const deals: any[] = [];
+  for (const d of [...byNameDeals, ...byPipelineDeals]) {
+    if (!seenDealIds.has(d.id)) { seenDealIds.add(d.id); deals.push(d); }
+  }
 
   // Build a set of Closed Lost stage IDs (isClosed=true, probability=0).
   // Extension deals in Closed Lost are not active and should not count.
@@ -515,6 +534,8 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
     const name: string = deal.properties?.dealname ?? "";
     const idx = name.indexOf(" (MSI");
     if (idx <= 0) continue;
+    // Skip regular MSI renewal deals (Year N) — only extension-type deals belong here
+    if (/\bYear\s+\d+\b/i.test(name)) continue;
     const raw     = name.slice(0, idx).trim();
     const extName = extractExtensionName(name);
     // Store under exact lowercase key AND normalised key
@@ -907,9 +928,14 @@ export async function cloneLineItemsToDeal(
 // e.g. "Eastex (MSI - Extension POM Prorated)"      → "POM"
 //      "Eastex (MSI Extension - Fiber Clarity Prorated)" → "Fiber Clarity"
 function extractExtensionName(dealName: string): string {
-  const match = dealName.match(/Extension\s*[-–]?\s*([^)]+)/i);
-  if (!match) return dealName;
-  return match[1].replace(/\s*prorated\s*$/i, "").trim();
+  // Standard format: "Company (MSI - Extension POM Prorated)" → "POM"
+  const extMatch = dealName.match(/Extension\s*[-–]?\s*([^)]+)/i);
+  if (extMatch) return extMatch[1].replace(/\s*prorated\s*$/i, "").trim();
+  // Non-standard format: "Company (MSI - POM)" or "Company (MSI - Clarity)" → "POM" / "Clarity"
+  // Some companies have extension deals named without the "Extension" keyword.
+  const msiMatch = dealName.match(/\(MSI\s*[-–]\s*([^)]+)\)/i);
+  if (msiMatch) return msiMatch[1].replace(/\s*prorated\s*$/i, "").trim();
+  return dealName.trim();
 }
 
 // Look up ALL active (non-terminated, non-closed-lost) extension deals for a company
@@ -918,7 +944,7 @@ function extractExtensionName(dealName: string): string {
 export async function getExtensionDealsForCompany(
   company: string
 ): Promise<{ id: string; extensionName: string; lineItems: any[] }[]> {
-  const [deals, pipelineRes] = await Promise.all([
+  const [byNameDeals, byPipelineDeals, pipelineRes] = await Promise.all([
     searchDeals(
       [
         { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
@@ -927,8 +953,21 @@ export async function getExtensionDealsForCompany(
       ["dealname", "service_terminated", "dealstage"],
       200
     ).catch(() => []),
+    searchDeals(
+      [
+        { propertyName: "pipeline", operator: "EQ", value: MSI_EXTENSION_PIPELINE_ID },
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+      ],
+      ["dealname", "service_terminated", "dealstage", "pipeline"],
+      200
+    ).catch(() => []),
     hs("GET", "/crm/v3/pipelines/deals").catch(() => ({ results: [] })),
   ]);
+  const seenIds2 = new Set<string>();
+  const deals: any[] = [];
+  for (const d of [...byNameDeals, ...byPipelineDeals]) {
+    if (!seenIds2.has(d.id)) { seenIds2.add(d.id); deals.push(d); }
+  }
 
   const closedLostIds = new Set<string>();
   for (const p of (pipelineRes.results ?? [])) {
@@ -949,7 +988,10 @@ export async function getExtensionDealsForCompany(
     if (deal.properties?.service_terminated) continue;
     if (deal.properties?.dealstage && closedLostIds.has(deal.properties.dealstage)) continue;
     const name: string = deal.properties?.dealname ?? "";
-    if (!/extension/i.test(name)) continue;
+    // Accept deals from the Extensions pipeline regardless of whether "Extension"
+    // appears in the name (e.g. "Cleveland Utilities (MSI - POM)")
+    const inExtPipeline = deal.properties?.pipeline === MSI_EXTENSION_PIPELINE_ID;
+    if (!inExtPipeline && !/extension/i.test(name)) continue;
     const idx = name.indexOf(" (MSI");
     if (idx <= 0) continue;
     if (name.slice(0, idx).trim().toLowerCase() !== needle) continue;
