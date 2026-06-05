@@ -561,6 +561,19 @@ export async function GET(req: NextRequest) {
           return ssd > 0 && ssd < renewalStartMs;
         }),
       ];
+      // Build a fast lookup: is this company known to CSA for a DIFFERENT month?
+      // If a company is in allInstances but NOT in this month's instances, their
+      // renewal is in a different period — don't pull their old HubSpot deal into
+      // this report via mop-up.  (e.g. Fiber Connect expires 5/31/2027 — an old
+      // July 2025 deal exists in HubSpot but should not appear in June 2026.)
+      const currentMonthCsaNames = (csaResult?.instances ?? []).map(i => i.instanceName);
+      const isInOtherMonthCsa = (coName: string): boolean => {
+        if (!csaResult) return false;
+        const inCurrent = currentMonthCsaNames.some(n => companyNamesMatch(n, coName));
+        if (inCurrent) return false; // their month — algorithm should have caught it
+        return csaResult.allInstances.some(n => companyNamesMatch(n.instanceName, coName));
+      };
+
       for (const d of mopUpSources) {
         if (seenIds.has(d.id)) continue;
         const name = d.properties?.dealname ?? "";
@@ -569,6 +582,8 @@ export async function GET(req: NextRequest) {
         if (!/\bYear\b/i.test(name)) continue;
         const co = normName(extractCompany(name));
         if (seenCompanyNorms.has(co)) continue; // already covered by CSA match
+        // Skip companies whose CSA renewal is in a different month
+        if (isInOtherMonthCsa(extractCompany(name))) continue;
         const yr = extractYearFromName(name) ?? 0;
         const prev = mopUpByCompany.get(co);
         const prevYr = prev ? (extractYearFromName(prev.properties?.dealname ?? "") ?? 0) : -1;
