@@ -658,7 +658,9 @@ export async function getClosedWonStage(pipelineNameSubstring: string): Promise<
 
   const isTargetStage = (label: string) => {
     const l = label.toLowerCase();
-    return l.includes("ready for billing") || l.includes("billing");
+    // Must match "ready for billing" exactly — "billing" alone is too broad and
+    // incorrectly matches "Pending Billing" which is an earlier pipeline stage.
+    return l.includes("ready for billing");
   };
   const isFallbackClosedWon = (s: any) =>
     s.metadata?.isClosed === "true" && s.metadata?.probability === "1.0";
