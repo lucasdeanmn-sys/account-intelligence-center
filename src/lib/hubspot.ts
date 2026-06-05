@@ -459,14 +459,31 @@ export interface ExtensionIndex {
  *  noc_instance_id so the route can find extensions regardless of whether
  *  the extension deal name prefix matches the MSI deal company name. */
 export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
-  const deals = await searchDeals(
-    [
-      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
-      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "Extension" },
-    ],
-    ["dealname", "service_terminated"],
-    200
-  ).catch(() => []);
+  const [deals, pipelineRes] = await Promise.all([
+    searchDeals(
+      [
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "Extension" },
+      ],
+      ["dealname", "service_terminated", "dealstage"],
+      200
+    ).catch(() => []),
+    hs("GET", "/crm/v3/pipelines/deals").catch(() => ({ results: [] })),
+  ]);
+
+  // Build a set of Closed Lost stage IDs (isClosed=true, probability=0).
+  // Extension deals in Closed Lost are not active and should not count.
+  const closedLostIds = new Set<string>();
+  for (const p of (pipelineRes.results ?? [])) {
+    for (const s of (p.stages ?? []) as any[]) {
+      if (
+        s.metadata?.isClosed === "true" &&
+        (s.metadata?.probability === "0.0" || s.metadata?.probability === "0")
+      ) {
+        closedLostIds.add(String(s.id));
+      }
+    }
+  }
 
   const byName  = new Map<string, string[]>();
   const byNocId = new Map<number, string[]>();
@@ -482,6 +499,8 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
 
   for (const deal of deals) {
     if (deal.properties?.service_terminated) continue;
+    // Skip deals in a Closed Lost stage — the extension was never executed
+    if (deal.properties?.dealstage && closedLostIds.has(deal.properties.dealstage)) continue;
     const name: string = deal.properties?.dealname ?? "";
     const idx = name.indexOf(" (MSI");
     if (idx <= 0) continue;
@@ -880,26 +899,42 @@ function extractExtensionName(dealName: string): string {
   return match[1].replace(/\s*prorated\s*$/i, "").trim();
 }
 
-// Look up ALL active (non-terminated) extension deals for a company and return
-// each deal's ID + display name + line items so the process route can copy them
-// to the renewal deal. A company can have multiple extension deals (e.g. POM + FOM).
+// Look up ALL active (non-terminated, non-closed-lost) extension deals for a company
+// and return each deal's ID + display name + line items so the process route can
+// copy them to the renewal deal. A company can have multiple extension deals (e.g. POM + FOM).
 export async function getExtensionDealsForCompany(
   company: string
 ): Promise<{ id: string; extensionName: string; lineItems: any[] }[]> {
-  const deals = await searchDeals(
-    [
-      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
-      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "Extension" },
-    ],
-    ["dealname", "service_terminated"],
-    200
-  ).catch(() => []);
+  const [deals, pipelineRes] = await Promise.all([
+    searchDeals(
+      [
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "Extension" },
+      ],
+      ["dealname", "service_terminated", "dealstage"],
+      200
+    ).catch(() => []),
+    hs("GET", "/crm/v3/pipelines/deals").catch(() => ({ results: [] })),
+  ]);
+
+  const closedLostIds = new Set<string>();
+  for (const p of (pipelineRes.results ?? [])) {
+    for (const s of (p.stages ?? []) as any[]) {
+      if (
+        s.metadata?.isClosed === "true" &&
+        (s.metadata?.probability === "0.0" || s.metadata?.probability === "0")
+      ) {
+        closedLostIds.add(String(s.id));
+      }
+    }
+  }
 
   const needle = company.toLowerCase();
   const matched: { id: string; extensionName: string; lineItems: any[] }[] = [];
 
   for (const deal of deals) {
     if (deal.properties?.service_terminated) continue;
+    if (deal.properties?.dealstage && closedLostIds.has(deal.properties.dealstage)) continue;
     const name: string = deal.properties?.dealname ?? "";
     if (!/extension/i.test(name)) continue;
     const idx = name.indexOf(" (MSI");
