@@ -88,22 +88,16 @@ export async function POST(req: NextRequest) {
 
     // 3. Set the renewal deal to Closed Won - Ready for Billing, update dates.
     //
-    // closedate is set to the END of the RENEWAL term (expirationDate + 1 year),
-    // not the end of the current/expiring term.  Rationale: some HubSpot setups
-    // copy closedate → service_terminated via automation when a deal moves to
-    // Closed Won.  Using the previous term's end date (e.g. 6/30/2026 on a deal
-    // that doesn't start until 7/1/2026) caused Year N+1 deals to show a
-    // service_terminated date before their term had even begun.
+    // closedate = end of the PREVIOUS (expiring) term — this is the intended
+    // convention: the renewal deal's close date marks when the prior term ends
+    // and the new one begins.
     //
-    // service_terminated is explicitly cleared on the renewal deal — it should
-    // remain empty until THIS deal's own term ends (i.e. when Year N+2 is processed
-    // next year).  This is defensive: the property should never be set on a fresh
-    // renewal deal, but a previous failed/undone processing run could have left a
-    // stale value behind.
-    const renewalExpiryDate = new Date(expirationDate + "T00:00:00.000Z");
-    renewalExpiryDate.setUTCFullYear(renewalExpiryDate.getUTCFullYear() + 1);
+    // service_terminated is explicitly cleared on the renewal deal.  It should
+    // remain empty until THIS deal's own term ends (i.e. when Year N+2 is
+    // processed next year).  Clearing it here is defensive: a previous failed
+    // or undone processing run could have left a stale value behind.
     const dealUpdates: Record<string, string> = {
-      closedate: renewalExpiryDate.getTime().toString(),
+      closedate: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
       service_terminated: "",
     };
     if (stage?.stageId) dealUpdates.dealstage = stage.stageId;
