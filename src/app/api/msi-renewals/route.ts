@@ -506,11 +506,16 @@ export async function GET(req: NextRequest) {
             // renewal window (current-year deals).  Mirror Tier 2's logic: fall
             // back to all name-matches if every deal starts at/after renewalStart
             // (e.g. a company whose deal ssd was recently updated or a Year-1 deal).
+            //
+            // NOTE: we require ssd > 0 (a real start date) here.  Accepting ssd === 0
+            // as "any deal with no start date" was allowing Year N+1 deals (whose ssd
+            // happens to be null/unset) to win over Year N deals when sorted by year
+            // number, causing service_terminated to be stamped on the wrong deal.
             const candidates = (() => {
               if (inst.instanceId === null || !allMatches.length) return allMatches;
               const pastWindow = allMatches.filter((d: any) => {
                 const ssd = parseInt(d.properties?.subscription_start_date ?? "0", 10);
-                return ssd === 0 || ssd < renewalStartMs;
+                return ssd > 0 && ssd < renewalStartMs;
               });
               return pastWindow.length > 0 ? pastWindow : allMatches;
             })();

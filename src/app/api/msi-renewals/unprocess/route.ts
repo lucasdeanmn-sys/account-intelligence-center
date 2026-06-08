@@ -16,14 +16,16 @@ export async function POST(req: NextRequest) {
     await updateDealProperties(currentDealId, { service_terminated: "" });
 
     // 2. If a renewal deal exists, move it back to the first open pipeline stage
-    //    so it no longer satisfies the "Closed Won - Ready for Billing" check.
-    //    This ensures re-running the report shows the deal as unprocessed even
-    //    before the next fetch refreshes the freshSvcTermMap.
+    //    and clear its service_terminated so it no longer satisfies the
+    //    "Closed Won - Ready for Billing" check.
+    //    service_terminated on the renewal deal may have been set by a HubSpot
+    //    automation (closedate → service_terminated on Closed Won stage entry);
+    //    clearing it here ensures a clean slate for re-processing.
     if (renewalDealId) {
       const stageId = await getFirstOpenStageId("renewal").catch(() => null);
-      if (stageId) {
-        await updateDealProperties(renewalDealId, { dealstage: stageId });
-      }
+      const renewalUpdates: Record<string, string> = { service_terminated: "" };
+      if (stageId) renewalUpdates.dealstage = stageId;
+      await updateDealProperties(renewalDealId, renewalUpdates);
     }
 
     return NextResponse.json({ success: true });
