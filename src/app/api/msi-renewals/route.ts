@@ -74,25 +74,38 @@ interface M1Parsed {
   m1NoteId: string | null;
   /** All MSI year numbers found in the note (italic + non-italic), sorted asc. */
   allYearsInNote: number[];
+  /** Term length in years parsed from the note title ("3 Year M1 Order Form:"). */
+  termYears: number | null;
+  /** Number of italicized (already-invoiced) MSI Year entries in the note. */
+  italicCount: number;
+}
+
+// Parse the integer from the M1 note title line:
+//   "3 Year M1 Order Form:"      → 3
+//   "Updated 3 year M1 Order:"   → 3
+function parseTermYears(html: string): number | null {
+  const m = html.match(/(?:updated\s+)?(\d+)\s+years?\s+m1\s+order/i);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 // Derive a human-readable sheet note from the parsed M1 data.
-// Auto-renew deals get "Auto-renewal"; order form deals get "Year X of Y on existing M1 agreement"
-// where X/Y reflect the position within the consecutive year sequence in the note.
+//   M = termYears (from the note title)
+//   N = italicCount + 1 (next year to be invoiced)
+//   N > M → "Auto-renewal" (beyond the contracted term)
+//   else  → "Year N of M on existing M1 agreement"
 function computeSheetNote(
   orderFormLicense: number | null,
   nextMsiYear: number | null,
-  allYearsInNote: number[]
+  termYears: number | null,
+  italicCount: number
 ): string {
   if (!orderFormLicense || !nextMsiYear) return "Auto-renewal";
-  const yearSet = new Set(allYearsInNote);
-  // Walk back to find the start of the consecutive block containing nextMsiYear
-  let blockStart = nextMsiYear;
-  while (yearSet.has(blockStart - 1)) blockStart--;
-  const blockLen = allYearsInNote.filter((y) => y >= blockStart && y <= nextMsiYear).length;
-  const pos = nextMsiYear - blockStart + 1;
-  if (blockLen <= 1) return `Year ${pos} on existing M1 agreement`;
-  return `Year ${pos} of ${blockLen} on existing M1 agreement`;
+  const M = termYears;
+  if (!M) return "Auto-renewal";
+  const N = italicCount + 1;
+  if (N > M) return "Auto-renewal";
+  if (M === 1) return `Year ${N} on existing M1 agreement`;
+  return `Year ${N} of ${M} on existing M1 agreement`;
 }
 
 function parseM1Note(
@@ -125,7 +138,7 @@ function parseM1Note(
     );
   });
   if (!m1Notes.length) {
-    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [] };
+    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [], termYears: null, italicCount: 0 };
   }
 
   // Pick the best note — always prefer the most recently created (highest note ID).
@@ -253,6 +266,8 @@ function parseM1Note(
     ])
   ).sort((a, b) => a - b);
 
+  const termYears = parseTermYears(html);
+
   // Return effective year values so extensions show year context in the UI
   return {
     dealId,
@@ -263,6 +278,8 @@ function parseM1Note(
     m1NoteHtml: html,
     m1NoteId,
     allYearsInNote,
+    termYears,
+    italicCount: italicEntries.size,
   };
 }
 
@@ -715,6 +732,8 @@ export async function GET(req: NextRequest) {
         m1NoteHtml: null,
         m1NoteId: null,
         allYearsInNote: [] as number[],
+        termYears: null,
+        italicCount: 0,
       };
       const msiYear = parsed.msiYear ?? extractYearFromName(deal.properties?.dealname ?? "");
       const nextMsiYear = msiYear ? msiYear + 1 : null;
@@ -838,7 +857,7 @@ export async function GET(req: NextRequest) {
         m1NoteId: parsed.m1NoteId ?? null,
         nocInstanceId,
         csaInstanceName,
-        sheetNote: computeSheetNote(orderFormLicense, nextMsiYear, parsed.allYearsInNote ?? []),
+        sheetNote: computeSheetNote(orderFormLicense, nextMsiYear, parsed.termYears ?? null, parsed.italicCount ?? 0),
         extensionNames,
         processed,
         cancelled,
