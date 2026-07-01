@@ -16,6 +16,7 @@ export const CANCEL_SENTINEL = "946684800000";
 export const MSI_PIPELINE_ID          = "984885";
 export const MSI_STAGE_READY          = "157830253";  // Closed Won - Ready for Billing
 export const MSI_STAGE_INVOICED       = "1072203278"; // Closed Won - Invoiced
+export const MSI_STAGE_DID_NOT_RENEW  = "1629134";   // Did Not Renew
 export const MSI_EXTENSION_PIPELINE_ID = "152877993"; // Extensions pipeline
 
 function token() {

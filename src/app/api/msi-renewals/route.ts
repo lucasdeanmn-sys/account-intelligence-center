@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
 import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
@@ -806,24 +806,29 @@ export async function GET(req: NextRequest) {
 
       const multiTenant = nocInstanceId != null && multiTenantIds.has(nocInstanceId);
 
-      // Detect cancellation.  Three signals checked in decreasing reliability:
+      // Detect cancellation.  Four signals checked in decreasing reliability:
       //
       //  1. service_terminated === CANCEL_SENTINEL (most reliable):
       //     Set directly on the deal by Step 4 of the cancel route.  Already
       //     fetched in the initial batch query — no extra API call needed, works
       //     across sessions and Vercel preview-URL changes.
       //
-      //  2. Company note tagged with this expiration date ("Did not renew — YYYY-MM-DD"):
+      //  2. dealstage === MSI_STAGE_DID_NOT_RENEW:
+      //     Deal was explicitly moved to the "Did Not Renew" stage in HubSpot.
+      //     Reliable — stage is fetched with the initial deal query.
+      //
+      //  3. Company note tagged with this expiration date ("Did not renew — YYYY-MM-DD"):
       //     Created by Step 3 of the cancel route.  Found via getCompanyNotesForDeal
       //     for ANY deal associated with the company — survives deal-ID changes.
       //     The date tag prevents false positives in future renewal periods.
       //
-      //  3. Plain "Did not renew" (no date tag):
+      //  4. Plain "Did not renew" (no date tag):
       //     Legacy — M1 note prepends (Step 1) and pre-date-tag standalone deal notes.
       //     Still checked for backward compatibility.
       const rawNotes = notesAndItems.find((n) => n.dealId === deal.id)?.notes ?? [];
       const cancelled =
         svcTerminated === CANCEL_SENTINEL ||
+        deal.properties?.dealstage === MSI_STAGE_DID_NOT_RENEW ||
         rawNotes.some((n: any) => {
           const body: string = n.properties?.hs_note_body ?? "";
           if (body.includes(`Did not renew — ${expirationDate}`)) return true;
