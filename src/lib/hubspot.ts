@@ -884,12 +884,24 @@ function getMsiProductName(renewalCount: number): string {
 // Clone all line items from sourceDealId to targetDealId.
 // The first (primary) line item always uses the matching catalog product so
 // HubSpot auto-populates the amount; add-on items are copied as-is.
+// If the source deal has no line items, a fresh catalog-tiered primary item
+// is created so the renewal deal is never left empty.
 export async function cloneLineItemsToDeal(
   sourceDealId: string,
   targetDealId: string,
   renewalCount: number
 ): Promise<void> {
   const items = await getDealLineItems(sourceDealId).catch(() => []);
+
+  if (!items.length) {
+    // Source deal has no line items — create a fresh catalog-tiered primary item
+    // rather than leaving the renewal deal empty.
+    const productId = getMsiProductId(renewalCount);
+    const productName = getMsiProductName(renewalCount);
+    await createLineItem(targetDealId, productName, renewalCount, null, null, productId, "annually");
+    return;
+  }
+
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (i === 0) {
@@ -1113,7 +1125,11 @@ export async function updateDealMrr(dealId: string): Promise<void> {
   for (const item of items) {
     const price = parseFloat(item.properties?.price ?? "0");
     const qty = parseInt(item.properties?.quantity ?? "1", 10);
-    if (price > 0 && qty > 0) totalAnnual += price * qty;
+    // Prefer the line item's own amount (catalog products auto-populate this
+    // immediately); fall back to price × qty for manually-priced items.
+    const lineAmount = parseFloat(item.properties?.amount ?? "0");
+    const contribution = lineAmount > 0 ? lineAmount : price * qty;
+    if (contribution > 0) totalAnnual += contribution;
   }
   if (totalAnnual > 0) {
     const mrr = (totalAnnual / 12).toFixed(2);
