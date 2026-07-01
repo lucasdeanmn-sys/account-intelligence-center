@@ -99,7 +99,7 @@ function computeSheetNote(
   termYears: number | null,
   italicCount: number
 ): string {
-  if (!orderFormLicense || !nextMsiYear) return "Auto-renewal";
+  if (!nextMsiYear) return "Auto-renewal";
   const M = termYears;
   if (!M) return "Auto-renewal";
   const N = italicCount + 1;
@@ -118,7 +118,7 @@ function parseM1Note(
 
   // Helper: extract max year number mentioned in a note body
   function maxYearInNote(body: string): number {
-    const re = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*[\d,]+/gi;
+    const re = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−:]\s*[\d,]+/gi;
     let max = 0;
     let hit: RegExpExecArray | null;
     while ((hit = re.exec(body)) !== null) max = Math.max(max, parseInt(hit[1], 10));
@@ -191,7 +191,7 @@ function parseM1Note(
   //   "MSI Year N - X,XXX"          → group 2 = main count
   //   "MSI Year N - X,XXX (Y,YYY)"  → group 2 = main count (paren ignored here)
   //   "MSI Year N - (X,XXX)"        → group 3 = paren-only count
-  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*(?:([\d,]+)(?:\s*\([^)]*\))?|\((\d[\d,]*)\))/i;
+  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−:]\s*(?:([\d,]+)(?:\s*\([^)]*\))?|\((\d[\d,]*)\))/i;
 
   // Collect italic (already-invoiced) entries
   const italicEntries = new Map<number, number>();
@@ -212,7 +212,7 @@ function parseM1Note(
   // Handles both "Year N - 1,000 (opt_paren)" and paren-only "Year N - (1,000)".
   const withoutItalics = html.replace(/<(?:em|i)[^>]*>[\s\S]*?<\/(?:em|i)>/gi, "");
   const nonItalicEntries = new Map<number, { main: number | null; paren: number | null }>();
-  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−]\s*(?:([\d,]+)(?:\s*\(([^)]*)\))?|\(([^)]*)\))/gi;
+  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−:]\s*(?:([\d,]+)(?:\s*\(([^)]*)\))?|\(([^)]*)\))/gi;
   while ((m = niRe.exec(withoutItalics)) !== null) {
     const yr = parseInt(m[1], 10);
     const main = m[2] ? parseCount(m[2]) : null;                   // normal "N - count" form

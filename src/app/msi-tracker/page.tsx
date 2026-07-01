@@ -426,7 +426,7 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
                 Auto-renew
               </span>
             )}
-            {entry.orderFormLicense === null && entry.currentYearLicense === null && (
+            {entry.orderFormLicense === null && entry.currentYearLicense === null && !entry.m1NoteId && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#ef444415", color: "#ef4444" }}>
                 No M1 note
               </span>
