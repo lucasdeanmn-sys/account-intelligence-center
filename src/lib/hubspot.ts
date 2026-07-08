@@ -680,7 +680,37 @@ export async function updateLineItem(lineItemId: string, quantity: number) {
 }
 
 export async function updateDealProperties(dealId: string, properties: Record<string, string>) {
-  return hs("PATCH", `/crm/v3/objects/deals/${dealId}`, { properties });
+  try {
+    return await hs("PATCH", `/crm/v3/objects/deals/${dealId}`, { properties });
+  } catch (err: any) {
+    // Portal conditional validation (added ~June 2026, after this app was built):
+    // once deal_registration_partner has a value, six registration fields
+    // (deal_reg_rep, deal_reg_date, registration_expiration, n7s_approved,
+    // products, current_sales_stage) become required on ANY edit. Hundreds of
+    // legacy renewal/extension deals carry partner=Adtran with those fields
+    // empty, so any PATCH to them bounces — even one changing an unrelated
+    // property like service_terminated or subscription_start_date.
+    //
+    // Registration data belongs only on new MSI-pipeline deals (where it's
+    // filled at registration time); renewals shouldn't carry it. So on this
+    // specific error, retry once with the partner value cleared, which removes
+    // the conditional requirement. Lazy self-heal: legacy deals get cleaned
+    // one at a time, as they're touched, with no mass backfill of fake
+    // registration data.
+    const msg = String(err?.message ?? "");
+    const isConditionalValidation =
+      msg.includes("required based on the values of other properties") ||
+      (msg.includes("PROPERTY_VALIDATION") && msg.includes("deal_reg"));
+    if (isConditionalValidation && !("deal_registration_partner" in properties)) {
+      console.warn(
+        `updateDealProperties(${dealId}): registration validation hit — retrying with deal_registration_partner cleared`
+      );
+      return await hs("PATCH", `/crm/v3/objects/deals/${dealId}`, {
+        properties: { ...properties, deal_registration_partner: "" },
+      });
+    }
+    throw err;
+  }
 }
 
 // Returns { pipelineId, stageId } for the "Closed Won - Ready for Billing" stage.
