@@ -236,7 +236,10 @@ export async function POST(req: NextRequest) {
 
     // 7. Append to Google Sheet (best-effort — failure is non-fatal but surfaced in response)
     let sheetWriteError: string | null = null;
-    if (googleConfigured() && company) {
+    if (isNoc360) {
+      // NOC360 renewals stay off the MSI renewal sheet — the yearly deal in
+      // HubSpot and the NOC360 section email (to Joan) are their record.
+    } else if (googleConfigured() && company) {
       const monthLabel = new Date(expirationDate + "T00:00:00.000Z").toLocaleString("en-US", {
         month: "long",
         year: "numeric",
@@ -246,7 +249,7 @@ export async function POST(req: NextRequest) {
       await appendRenewalRow(monthLabel, {
         company,
         instanceName: csaInstanceName ?? null,
-        currentLicense: (isNoc360 ? (csaLicenseCount ?? null) : (currentYearLicense ?? null)),   // NOC360: CSA license; MSI: current year's invoiced count
+        currentLicense: currentYearLicense ?? null,   // current year's invoiced count, not next year's order form
         csaCount: csaCount ?? null,
         csaRounded: csaRounded ?? null,
         renewalCount,
