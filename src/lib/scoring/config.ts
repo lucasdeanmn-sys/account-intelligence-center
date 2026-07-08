@@ -88,7 +88,7 @@ export const HUBSPOT_PROPS = {
   NAME: "name",
   DOMAIN: "domain",
   STATE: "state",
-  SUBSCRIBERS: "of_subs_license_", // reuse existing convention; swap if prospects use another field
+  SUBSCRIBERS: "broadband_subs", // "Total Broadband Subs" — 192 prospects have values (of_subs_license_ doesn't exist in this portal)
   SEGMENT: "aic_segment", // enumeration: RURAL_ILEC | COOP | MUNI | FIBER_OVERBUILDER | WISP | CABLE
   CALIX: "aic_calix_shop", // boolean checkbox
   MANUAL_TRIGGER: "aic_manual_trigger", // boolean checkbox, set when you spot news
