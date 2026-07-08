@@ -24,6 +24,8 @@ export interface CsaInstance {
   instanceName: string;
   circuits: number;
   domain: string | null;
+  /** CSA account status (Production / Staging / Disabled). */
+  status: string | null;
 }
 
 interface CsaRecord {
@@ -31,6 +33,8 @@ interface CsaRecord {
   circuits: number;
   domain: string | null;
   renewalDate: string | null;
+  /** CSA account status (Production / Staging / Disabled). */
+  status: string | null;
 }
 
 // ─── MCP SSE helper ───────────────────────────────────────────────────────────
@@ -204,7 +208,10 @@ async function _callMcpInner(
 
 async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: CsaInstance[] }> {
   // get_snapshot returns all companies — it's a large payload; allow up to 30s.
-  const parsed = await callMcp("get_snapshot", {}, 30_000);
+  // status_filter "All": the server defaults to Production only, which made
+  // Staging renewals (e.g. Country Wireless, Clarksville) invisible to the
+  // CSA-authoritative matching and reliant on the HubSpot date-pool mop-up.
+  const parsed = await callMcp("get_snapshot", { status_filter: "All" }, 30_000);
 
   // Snapshot returns { snapshot_date, total_returned, filters, companies: [...] }
   const raw: any[] = Array.isArray(parsed)
@@ -222,6 +229,7 @@ async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: Cs
       circuits: (r.circuits as number) ?? 0,
       domain: (r.domain as string | null) ?? null,
       renewalDate: (r.renewal_date as string | null) ?? null,
+      status: (r.status as string | null) ?? null,
     }));
 
   const allInstances: CsaInstance[] = records.map((r) => ({
@@ -229,6 +237,7 @@ async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: Cs
     instanceName: r.instance,
     circuits: r.circuits,
     domain: r.domain,
+    status: r.status,
   }));
 
   return { records, allInstances };
@@ -351,6 +360,7 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
       instanceName: target.instance,
       circuits,
       domain: target.domain,
+      status: target.status,
     });
   }
 

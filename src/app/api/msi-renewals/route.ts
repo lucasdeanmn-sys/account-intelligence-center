@@ -347,6 +347,10 @@ export async function GET(req: NextRequest) {
     // directly from the CSA match result — e.g. the Bartlett Electric Cooperative
     // MSI deal maps to "BEC Communication" if the CSA instance is "BEC Communication".
     const dealCSANameMap = new Map<string, string>();
+    // CSA instances whose matched deal was already claimed by another instance
+    // (e.g. a sub-tenant name-matching the parent's deal). Tracked so they count
+    // as represented and don't get flagged as unmatched.
+    const duplicateCsaMatches = new Set<string>();
     // Debug info: track how each CSA instance was resolved (for troubleshooting)
     const _csaDebug: { instance: string; method: string; dealName?: string }[] = [];
 
@@ -375,7 +379,12 @@ export async function GET(req: NextRequest) {
           currentDeals.push(found);
           dealCSANameMap.set(found.id, inst.instanceName);
           _csaDebug.push({ instance: inst.instanceName, method: foundMethod, dealName: found.properties?.dealname });
-        } else if (!found) {
+        } else if (found) {
+          // Deal already claimed by another CSA instance. Previously this fell
+          // through silently and the instance vanished from the report.
+          duplicateCsaMatches.add(inst.instanceName);
+          _csaDebug.push({ instance: inst.instanceName, method: "duplicate(dealAlreadyMatched)", dealName: found.properties?.dealname });
+        } else {
           needFallback.push(inst);
           _csaDebug.push({ instance: inst.instanceName, method: "pending" });
         }
@@ -449,6 +458,12 @@ export async function GET(req: NextRequest) {
               _csaDebug[debugIdx].method = "instanceId:found";
               _csaDebug[debugIdx].dealName = best.properties?.dealname;
             }
+          } else {
+            duplicateCsaMatches.add(inst.instanceName);
+            if (debugIdx >= 0) {
+              _csaDebug[debugIdx].method = "instanceId:duplicate(dealAlreadyMatched)";
+              _csaDebug[debugIdx].dealName = best.properties?.dealname;
+            }
           }
         }
 
@@ -515,6 +530,12 @@ export async function GET(req: NextRequest) {
               dealCSANameMap.set(best.id, inst.instanceName);
               if (debugIdx >= 0) {
                 _csaDebug[debugIdx].method = "nameSearch:found";
+                _csaDebug[debugIdx].dealName = best.properties?.dealname;
+              }
+            } else {
+              duplicateCsaMatches.add(inst.instanceName);
+              if (debugIdx >= 0) {
+                _csaDebug[debugIdx].method = "nameSearch:duplicate(dealAlreadyMatched)";
                 _csaDebug[debugIdx].dealName = best.properties?.dealname;
               }
             }
@@ -838,6 +859,69 @@ export async function GET(req: NextRequest) {
         multiTenant,
       };
     });
+
+    // Fail loud: CSA is the authoritative renewal list, but until now a CSA
+    // instance that matched no HubSpot deal in any tier simply vanished from
+    // the report (only a _csaDebug breadcrumb remained). Surface each one as a
+    // needs-review row instead so missing/misnamed/misdated deals get found.
+    const matchedCsaNames = new Set<string>([
+      ...Array.from(dealCSANameMap.values()),
+      ...Array.from(duplicateCsaMatches),
+    ]);
+    // Belt and suspenders: skip instances already represented in the report
+    // via the mop-up (deal found by date pool without a CSA-tier match).
+    const representedInEntries = (instName: string): boolean =>
+      entries.some(
+        (e) =>
+          companyNamesMatch(e.company, instName) ||
+          (e.csaInstanceName ? companyNamesMatch(e.csaInstanceName, instName) : false)
+      );
+    const unmatchedCsaInstances = (csaResult?.instances ?? []).filter(
+      (inst) =>
+        !matchedCsaNames.has(inst.instanceName) &&
+        inst.status !== "Disabled" && // churned accounts don't renew
+        !representedInEntries(inst.instanceName)
+    );
+    for (const inst of unmatchedCsaInstances) {
+      const csaCount = inst.circuits ?? null;
+      const csaRounded =
+        csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
+      const statusPart =
+        inst.status && inst.status !== "Production" ? `, status: ${inst.status}` : "";
+      entries.push({
+        currentDealId: `csa-unmatched:${inst.instanceName}`,
+        currentDealName: "(no HubSpot deal matched)",
+        company: inst.instanceName,
+        hasExtension: false,
+        msiYear: null,
+        nextMsiYear: null,
+        orderFormLicense: null,
+        currentYearLicense: null,
+        csaCount,
+        csaRounded,
+        renewalCount: null,
+        renewalDealId: null,
+        renewalDealName: `${inst.instanceName} (MSI - Year ?)`,
+        renewalStartDate,
+        expirationDate,
+        m1NoteHtml: null,
+        m1NoteId: null,
+        nocInstanceId: inst.instanceId ?? null,
+        csaInstanceName: inst.instanceName,
+        sheetNote: "NEEDS REVIEW — CSA renewal with no matching HubSpot deal",
+        needsReview: true,
+        needsReviewReason:
+          `CSA lists "${inst.instanceName}" renewing this month (${csaCount?.toLocaleString() ?? "?"} circuits${statusPart}), ` +
+          `but no HubSpot MSI deal matched by start date, instance ID, or name search. ` +
+          `Check: (a) the current-year deal's subscription_start_date, (b) whether the deal name ` +
+          `matches the CSA instance name, or (c) whether this is a sub-tenant instance with no deal of its own.`,
+        unmatchedCsa: true,
+        extensionNames: [],
+        processed: false,
+        cancelled: false,
+        multiTenant: inst.instanceId != null && multiTenantIds.has(inst.instanceId),
+      });
+    }
 
     entries.sort((a, b) => a.company.localeCompare(b.company));
 

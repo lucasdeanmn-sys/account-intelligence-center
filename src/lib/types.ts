@@ -127,6 +127,9 @@ export interface RenewalEntry {
   needsReview?: boolean;
   /** Why the entry was flagged for review (null when needsReview is false). */
   needsReviewReason?: string | null;
+  /** True for synthetic rows created from a CSA renewal instance that matched
+   *  no HubSpot deal. These have no deal to process — fix HubSpot first. */
+  unmatchedCsa?: boolean;
   /** Extension product names active for this company, e.g. ["POM", "Fiber Clarity"]. */
   extensionNames?: string[];
   processed?: boolean;

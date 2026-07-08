@@ -33,6 +33,7 @@ async function fetchSnapshot(): Promise<{
       circuits: (r.circuits as number) ?? 0,
       domain: (r.domain as string | null) ?? null,
       renewalDate: (r.renewal_date as string | null) ?? null,
+      status: (r.status as string | null) ?? null,
     }));
 
   const allInstances: CsaInstance[] = records.map((r) => ({
@@ -40,6 +41,7 @@ async function fetchSnapshot(): Promise<{
     instanceName: r.instance,
     circuits: r.circuits,
     domain: r.domain,
+    status: r.status,
   }));
 
   return { records, allInstances };

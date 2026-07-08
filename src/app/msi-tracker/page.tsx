@@ -510,6 +510,14 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
                 <RefreshCw size={13} />
               </button>
             </div>
+          ) : entry.unmatchedCsa ? (
+            <span
+              className="text-xs px-3 py-1.5"
+              style={{ color: "#64748b" }}
+              title="No HubSpot deal matched this CSA renewal — create or fix the deal in HubSpot, then reload."
+            >
+              No deal to process
+            </span>
           ) : (
             <>
               <button
