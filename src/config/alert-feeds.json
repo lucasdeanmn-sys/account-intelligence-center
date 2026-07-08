@@ -1,0 +1,4 @@
+{
+  "_comment": "Map HubSpot company ID -> Google Alerts RSS feed URL. Create alerts at google.com/alerts with 'Deliver to: RSS feed', copy the feed URL here. Remove this _comment key or leave it — it's ignored because it's not a numeric HubSpot ID.",
+  "12345678901": "https://www.google.com/alerts/feeds/EXAMPLE_FEED_ID/EXAMPLE_ALERT_ID"
+}
