@@ -101,37 +101,76 @@ function review(sheetNote: string, reason: string): SheetNoteResult {
   return { sheetNote, needsReview: true, needsReviewReason: reason };
 }
 
+/** Strip HTML tags/entities and return the first line of visible note text
+ *  (up to maxLen chars) — used to show what a garbled title actually says. */
+export function noteFirstLine(html: string, maxLen = 90): string {
+  const text = html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:p|div|li|h\d)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ");
+  const firstLine =
+    text
+      .split("\n")
+      .map((l) => l.replace(/\s+/g, " ").trim())
+      .find((l) => l.length > 0) ?? "";
+  return firstLine.length > maxLen ? firstLine.slice(0, maxLen) + "…" : firstLine;
+}
+
+/** Format [8, 9, 10] → "Years 8, 9, 10"; [4] → "Year 4". */
+function fmtYears(years: number[]): string {
+  return `Year${years.length === 1 ? "" : "s"} ${years.join(", ")}`;
+}
+
+export interface SheetNoteInput {
+  /** Decoded M1 note HTML, or null when no M1 note was found on the deal. */
+  noteHtml: string | null;
+  /** Term length parsed from the title line — the ONLY source of M. */
+  termYears: number | null;
+  /** Italicized (invoiced) MSI year numbers found in the note, ascending. */
+  italicYears: number[];
+}
+
 /**
  * Derive the sheet note from parsed M1 data. Fails loud, not silent:
  *
  *  - Missing note or missing/unparseable title line → needs-review (these used
- *    to silently render "Auto-renewal", hiding data problems).
- *  - italicCount > M (stray italicized FUTURE years inflating N) → needs-review.
- *    Legitimate auto-renewal is exactly N === M + 1, i.e. italicCount === M.
- *  - 1-year form whose only year is italicized → needs-review. Under the
- *    italicCount+1 rule it computes N=2 > M=1 = Auto-renewal, but such accounts
- *    are often just in their active final year, so we surface the ambiguity and
- *    state which rule was applied instead of guessing.
+ *    to silently render "Auto-renewal", hiding data problems). The reason
+ *    includes what the note's first line actually says.
+ *  - italicCount > M (stray italicized FUTURE years inflating N) → needs-review,
+ *    naming the specific year(s) that are the likely strays. Legitimate
+ *    auto-renewal is exactly N === M + 1, i.e. italicCount === M.
+ *  - 1-year form whose only year is italicized → needs-review, naming the year
+ *    and stating the rule applied. Under the italicCount+1 rule it computes
+ *    N=2 > M=1 = Auto-renewal, but such accounts are often just in their
+ *    active final year, so we surface the ambiguity instead of guessing.
  *
  * Never throws — every input maps to a result.
  */
-export function computeSheetNote(
-  hasM1Note: boolean,
-  termYears: number | null,
-  italicCount: number
-): SheetNoteResult {
-  if (!hasM1Note) {
+export function computeSheetNote(input: SheetNoteInput): SheetNoteResult {
+  const { noteHtml, termYears } = input;
+  const italicYears = [...input.italicYears].sort((a, b) => a - b);
+  const italicCount = italicYears.length;
+
+  if (noteHtml === null) {
     return review(
       "NEEDS REVIEW — no M1 order form note found",
-      "No M1 order form note found on the deal, so term/year math is impossible."
+      "No M1 order form note found on this deal. Create the M1 note " +
+        '(title "<N> Year M1 Order Form:", bullets "MSI Year <n> - <count>") ' +
+        "or check whether it's attached to the wrong company/deal."
     );
   }
 
   if (termYears === null || termYears < 1) {
+    const firstLine = noteFirstLine(noteHtml);
+    const italicPart = italicCount
+      ? ` ${fmtYears(italicYears)} ${italicCount === 1 ? "is" : "are"} italicized, but N can't be computed without the term.`
+      : "";
     return review(
       "NEEDS REVIEW — M1 note title missing or unparseable",
-      'Could not parse the term length from the note title ("<N> Year M1 Order Form:"). ' +
-        "Fix the title line before trusting the year math."
+      `Term length could not be parsed from the note title. The note's first line reads ` +
+        `"${firstLine || "(empty)"}" — expected "<N> Year M1 Order Form:". ` +
+        `Fix the title line, then the year math will resolve.${italicPart}`
     );
   }
 
@@ -140,11 +179,16 @@ export function computeSheetNote(
 
   // Guard: more italic years than the term allows means a future year is
   // italicized that shouldn't be. Rendering Auto-renewal here would be wrong.
+  // With contiguous years, the invoiced block is the first M italic years —
+  // anything after that is the likely stray.
   if (italicCount > M) {
+    const strays = italicYears.slice(M);
     return review(
-      `NEEDS REVIEW — ${italicCount} italicized year${italicCount === 1 ? "" : "s"} exceed the ${M}-year term`,
-      `italicCount (${italicCount}) > termYears (${M}): a stray future year is italicized ` +
-        "beyond what can have been invoiced — clean up the note."
+      `NEEDS REVIEW — ${italicCount} italicized years exceed the ${M}-year term (likely stray: ${fmtYears(strays)})`,
+      `The title says this is a ${M}-year form, but ${italicCount} years are italicized ` +
+        `(${fmtYears(italicYears)}). At most ${M} can have been invoiced, so the likely stray ` +
+        `${strays.length === 1 ? "is" : "are"} ${fmtYears(strays)} — de-italicize ` +
+        `${strays.length === 1 ? "it" : "them"} in the note if ${strays.length === 1 ? "it hasn't" : "they haven't"} actually been invoiced.`
     );
   }
 
@@ -152,11 +196,13 @@ export function computeSheetNote(
     // Here N === M + 1 exactly (every contracted year invoiced).
     if (M === 1) {
       // Ambiguous: often just the active final year, not a true auto-renewal.
+      const yr = italicYears[0];
       return review(
-        "NEEDS REVIEW — 1-year form fully italicized (italicCount+1 rule computes Auto-renewal; may be Year 1 of 1)",
-        "Single-year form with its only year italicized. Rule applied: N = italicCount + 1 = 2 > M = 1 " +
-          "→ Auto-renewal. But such accounts are often in their active final year (Year 1 of 1). " +
-          "Confirm intended behavior for this note."
+        `NEEDS REVIEW — 1-year form with its only year (Year ${yr}) italicized (computed Auto-renewal; may be Year 1 of 1)`,
+        `Single-year form whose only listed year (MSI Year ${yr}) is italicized. ` +
+          `Rule applied: N = italicCount + 1 = 2 > M = 1 → Auto-renewal. ` +
+          `If this account is actually in its active final year it should read "Year 1 of 1" — ` +
+          `de-italicize MSI Year ${yr} if it hasn't been invoiced yet; leave it if Auto-renewal is correct.`
       );
     }
     return ok("Auto-renewal");

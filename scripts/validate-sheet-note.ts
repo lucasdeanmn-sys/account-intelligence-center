@@ -14,12 +14,12 @@ import {
 function run(name: string, rawHtml: string | null): SheetNoteResult {
   if (rawHtml === null) {
     // No M1 note found on the deal at all
-    return computeSheetNote(false, null, 0);
+    return computeSheetNote({ noteHtml: null, termYears: null, italicYears: [] });
   }
   const html = decodeNoteEntities(rawHtml);
   const termYears = parseTermYears(html);
-  const italicCount = extractItalicYearEntries(html).size;
-  return computeSheetNote(true, termYears, italicCount);
+  const italicYears = Array.from(extractItalicYearEntries(html).keys()).sort((a, b) => a - b);
+  return computeSheetNote({ noteHtml: html, termYears, italicYears });
 }
 
 interface Case {
@@ -27,6 +27,8 @@ interface Case {
   html: string | null;
   expectNote?: string | RegExp;
   expectReview: boolean;
+  /** Optional: the needs-review reason must match this (specificity check). */
+  expectReason?: RegExp;
 }
 
 const cases: Case[] = [
@@ -49,9 +51,10 @@ const cases: Case[] = [
     expectReview: false,
   },
   {
-    name: "4a. Title line missing entirely",
+    name: "4a. Title line missing entirely (reason must quote the actual first line)",
     html: `<p>M1 Order details</p><ul><li><em>MSI Year 1 - 1,000</em></li><li>MSI Year 2 - 1,000</li></ul>`,
     expectNote: /NEEDS REVIEW/,
+    expectReason: /first line reads "M1 Order details"/,
     expectReview: true,
   },
   {
@@ -67,16 +70,18 @@ const cases: Case[] = [
     expectReview: true,
   },
   {
-    name: "5. 1-yr form, single year italicized (ambiguous)",
+    name: "5. 1-yr form, single year italicized (must name Year 4 and the rule applied)",
     html: `<p>1 Year M1 Order Form:</p><ul><li><em>MSI Year 4 - 1,200</em></li></ul>`,
     expectNote: /NEEDS REVIEW/,
+    expectReason: /MSI Year 4[\s\S]*N = italicCount \+ 1 = 2 > M = 1/,
     expectReview: true,
   },
   // ---- extra hardening regressions ----
   {
-    name: "G1. Stray FUTURE italic: 3-yr form with 4 italicized years (italicCount 4 > M 3)",
+    name: "G1. Stray FUTURE italic: 3-yr form with 4 italicized years (must name Year 4 as the stray)",
     html: `<p>3 Year M1 Order Form:</p><ul><li><em>MSI Year 1 - 1,000</em></li><li><em>MSI Year 2 - 1,000</em></li><li><em>MSI Year 3 - 1,000</em></li><li><em>MSI Year 4 - 1,000</em></li></ul>`,
     expectNote: /NEEDS REVIEW/,
+    expectReason: /likely stray (is|are) Year 4/,
     expectReview: true,
   },
   {
@@ -96,6 +101,13 @@ const cases: Case[] = [
     html: `<p>1 Year M1 Order Form:</p><ul><li>MSI Year 6 - 1,000</li></ul>`,
     expectNote: "Year 1 of 1 on existing M1 agreement",
     expectReview: false,
+  },
+  {
+    name: "G6. Two strays: 2-yr form with Years 5/6/7/8 all italicized (must name Years 7, 8)",
+    html: `<p>2 Year M1 Order Form:</p><ul><li><em>MSI Year 5 - 1,000</em></li><li><em>MSI Year 6 - 1,000</em></li><li><em>MSI Year 7 - 1,000</em></li><li><em>MSI Year 8 - 1,000</em></li></ul>`,
+    expectNote: /NEEDS REVIEW/,
+    expectReview: true,
+    expectReason: /likely stray are Years 7, 8/,
   },
   {
     name: "G5. Malformed garbage note (found via 'M1 Order' text, nothing parseable) → no crash",
@@ -121,7 +133,8 @@ for (const c of cases) {
       ? res.sheetNote === c.expectNote
       : c.expectNote.test(res.sheetNote));
   const reviewOk = res.needsReview === c.expectReview;
-  const pass = noteOk && reviewOk;
+  const reasonOk = c.expectReason === undefined || c.expectReason.test(res.needsReviewReason ?? "");
+  const pass = noteOk && reviewOk && reasonOk;
   if (!pass) failed++;
   console.log(`${pass ? "✓" : "✗"} ${c.name}`);
   console.log(`    sheetNote:   "${res.sheetNote}"`);

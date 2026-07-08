@@ -74,6 +74,9 @@ interface M1Parsed {
   termYears: number | null;
   /** Number of italicized (already-invoiced) MSI Year entries in the note. */
   italicCount: number;
+  /** The italicized (invoiced) MSI year numbers themselves, sorted asc —
+   *  used to name specific stray/ambiguous years in needs-review reasons. */
+  italicYears: number[];
 }
 
 // Sheet note derivation now lives in src/lib/m1Note.ts (computeSheetNote):
@@ -114,7 +117,7 @@ function parseM1Note(
     );
   });
   if (!m1Notes.length) {
-    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [], termYears: null, italicCount: 0 };
+    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [], termYears: null, italicCount: 0, italicYears: [] };
   }
 
   // Pick the best note — always prefer the most recently created (highest note ID).
@@ -233,6 +236,7 @@ function parseM1Note(
     allYearsInNote,
     termYears,
     italicCount: italicEntries.size,
+    italicYears: Array.from(italicEntries.keys()).sort((a, b) => a - b),
   };
 }
 
@@ -687,6 +691,7 @@ export async function GET(req: NextRequest) {
         allYearsInNote: [] as number[],
         termYears: null,
         italicCount: 0,
+        italicYears: [] as number[],
       };
       const msiYear = parsed.msiYear ?? extractYearFromName(deal.properties?.dealname ?? "");
       const nextMsiYear = msiYear ? msiYear + 1 : null;
@@ -798,11 +803,11 @@ export async function GET(req: NextRequest) {
       // Sheet note: M comes ONLY from the note title, N from the italic count.
       // Missing note / garbled title / stray italics → needs-review, never a
       // silent "Auto-renewal" and never a crash.
-      const noteResult = computeSheetNote(
-        parsed.m1NoteHtml !== null,
-        parsed.termYears ?? null,
-        parsed.italicCount ?? 0
-      );
+      const noteResult = computeSheetNote({
+        noteHtml: parsed.m1NoteHtml,
+        termYears: parsed.termYears ?? null,
+        italicYears: parsed.italicYears ?? [],
+      });
 
       return {
         currentDealId: deal.id,
