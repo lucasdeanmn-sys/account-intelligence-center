@@ -443,8 +443,9 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
             {entry.msiYear && ` · Year ${entry.msiYear} → ${entry.nextMsiYear ?? "?"}`}
           </p>
           {entry.needsReview && entry.needsReviewReason && (
-            <p className="text-xs mt-1" style={{ color: "#f87171" }} title={entry.needsReviewReason}>
-              ⚠ {entry.needsReviewReason}
+            <p className="text-xs mt-1 truncate" style={{ color: "#8b93a7" }} title={entry.needsReviewReason}>
+              <span style={{ color: "#f87171" }}>⚠ </span>
+              {entry.needsReviewReason}
             </p>
           )}
         </div>

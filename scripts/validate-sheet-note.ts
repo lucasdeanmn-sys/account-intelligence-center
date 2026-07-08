@@ -7,6 +7,7 @@ import {
   decodeNoteEntities,
   parseTermYears,
   extractItalicYearEntries,
+  extractNonItalicYearEntries,
   computeSheetNote,
   SheetNoteResult,
 } from "../src/lib/m1Note";
@@ -14,12 +15,13 @@ import {
 function run(name: string, rawHtml: string | null): SheetNoteResult {
   if (rawHtml === null) {
     // No M1 note found on the deal at all
-    return computeSheetNote({ noteHtml: null, termYears: null, italicYears: [] });
+    return computeSheetNote({ noteHtml: null, termYears: null, italicYears: [], nonItalicYears: [] });
   }
   const html = decodeNoteEntities(rawHtml);
   const termYears = parseTermYears(html);
   const italicYears = Array.from(extractItalicYearEntries(html).keys()).sort((a, b) => a - b);
-  return computeSheetNote({ noteHtml: html, termYears, italicYears });
+  const nonItalicYears = Array.from(extractNonItalicYearEntries(html).keys()).sort((a, b) => a - b);
+  return computeSheetNote({ noteHtml: html, termYears, italicYears, nonItalicYears });
 }
 
 interface Case {
@@ -78,11 +80,23 @@ const cases: Case[] = [
   },
   // ---- extra hardening regressions ----
   {
-    name: "G1. Stray FUTURE italic: 3-yr form with 4 italicized years (must name Year 4 as the stray)",
+    name: "G1. Anza pattern: 3-yr form, Years 1-4 all italicized (contiguous past term) → Auto-renewal",
     html: `<p>3 Year M1 Order Form:</p><ul><li><em>MSI Year 1 - 1,000</em></li><li><em>MSI Year 2 - 1,000</em></li><li><em>MSI Year 3 - 1,000</em></li><li><em>MSI Year 4 - 1,000</em></li></ul>`,
+    expectNote: "Auto-renewal",
+    expectReview: false,
+  },
+  {
+    name: "G1b. CAEC pattern: 3-yr form covering later years, 3/4/5/6 all italicized → Auto-renewal",
+    html: `<p>Renewal 3 Year M1 Order Form:</p><ul><li><em>MSI Year 3 - 24,000</em></li><li><em>MSI Year 4 - 24,000</em></li><li><em>MSI Year 5 - 24,500</em></li><li><em>MSI Year 6 - 24,500</em></li></ul>`,
+    expectNote: "Auto-renewal",
+    expectReview: false,
+  },
+  {
+    name: "G1c. BROKEN run: Year 2 uninvoiced below italic Years 1 and 3 → needs-review naming Year 2",
+    html: `<p>3 Year M1 Order Form:</p><ul><li><em>MSI Year 1 - 1,000</em></li><li>MSI Year 2 - 1,000</li><li><em>MSI Year 3 - 1,000</em></li></ul>`,
     expectNote: /NEEDS REVIEW/,
-    expectReason: /likely stray (is|are) Year 4/,
     expectReview: true,
+    expectReason: /Year 2 sits uninvoiced below italicized Year 3/,
   },
   {
     name: "G2. Bullet count ≠ title term: '3 Year' title but 5 bullets, 1 italic → M from TITLE",
@@ -103,11 +117,16 @@ const cases: Case[] = [
     expectReview: false,
   },
   {
-    name: "G6. Two strays: 2-yr form with Years 5/6/7/8 all italicized (must name Years 7, 8)",
+    name: "G6. Long auto-renewal: 2-yr form with Years 5/6/7/8 all italicized (contiguous) → Auto-renewal",
     html: `<p>2 Year M1 Order Form:</p><ul><li><em>MSI Year 5 - 1,000</em></li><li><em>MSI Year 6 - 1,000</em></li><li><em>MSI Year 7 - 1,000</em></li><li><em>MSI Year 8 - 1,000</em></li></ul>`,
-    expectNote: /NEEDS REVIEW/,
-    expectReview: true,
-    expectReason: /likely stray are Years 7, 8/,
+    expectNote: "Auto-renewal",
+    expectReview: false,
+  },
+  {
+    name: "G7. UCS renewal note: 3-yr form Years 3/4/5, Year 3 italicized → Year 2 of 3",
+    html: `<p>Renewal 3 Year M1 Order Form</p><ul><li><em>MSI Year 3 - 32,000</em></li><li>MSI Year 4 - 32,000</li><li>MSI Year 5 - 32,000</li></ul>`,
+    expectNote: "Year 2 of 3 on existing M1 agreement",
+    expectReview: false,
   },
   {
     name: "G5. Malformed garbage note (found via 'M1 Order' text, nothing parseable) → no crash",

@@ -4,7 +4,7 @@ import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
-import { parseCount, decodeNoteEntities, extractItalicYearEntries, parseTermYears, computeSheetNote } from "@/lib/m1Note";
+import { decodeNoteEntities, extractItalicYearEntries, extractNonItalicYearEntries, parseTermYears, computeSheetNote } from "@/lib/m1Note";
 
 export const maxDuration = 90;
 export const dynamic = "force-dynamic";
@@ -80,6 +80,9 @@ interface M1Parsed {
   /** The italicized (invoiced) MSI year numbers themselves, sorted asc —
    *  used to name specific stray/ambiguous years in needs-review reasons. */
   italicYears: number[];
+  /** Non-italic (not-yet-invoiced) MSI year numbers, sorted asc — used to
+   *  detect broken italic runs (uninvoiced years below invoiced ones). */
+  nonItalicYears: number[];
 }
 
 // Sheet note derivation now lives in src/lib/m1Note.ts (computeSheetNote):
@@ -87,8 +90,10 @@ interface M1Parsed {
 //   N = italicCount + 1 — position within this order form, not cumulative year
 //   N <= M     → "Year N of M on existing M1 agreement"
 //   N == M + 1 → "Auto-renewal"
-//   Missing/garbled title, italicCount > M, or a fully-italicized 1-year form
-//   → needs-review (fail loud), never a silent "Auto-renewal" and never a crash.
+//   A contiguous italic run past the term = Auto-renewal (normal bookkeeping).
+//   Missing/garbled title, a BROKEN italic run (uninvoiced year below invoiced
+//   ones), or a fully-italicized 1-year form → needs-review (fail loud), never
+//   a silent "Auto-renewal" and never a crash.
 
 function parseM1Note(
   dealId: string,
@@ -120,7 +125,7 @@ function parseM1Note(
     );
   });
   if (!m1Notes.length) {
-    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [], termYears: null, italicCount: 0, italicYears: [] };
+    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [], termYears: null, italicCount: 0, italicYears: [], nonItalicYears: [] };
   }
 
   // Pick the best note — always prefer the most recently created (highest note ID).
@@ -167,18 +172,9 @@ function parseM1Note(
   const italicEntries = extractItalicYearEntries(html);
   let m: RegExpExecArray | null;
 
-  // Collect non-italic (upcoming) entries.
-  // Handles both "Year N - 1,000 (opt_paren)" and paren-only "Year N - (1,000)".
-  const withoutItalics = html.replace(/<(?:em|i)[^>]*>[\s\S]*?<\/(?:em|i)>/gi, "");
-  const nonItalicEntries = new Map<number, { main: number | null; paren: number | null }>();
-  const niRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−:]\s*(?:([\d,]+)(?:\s*\(([^)]*)\))?|\(([^)]*)\))/gi;
-  while ((m = niRe.exec(withoutItalics)) !== null) {
-    const yr = parseInt(m[1], 10);
-    const main = m[2] ? parseCount(m[2]) : null;                   // normal "N - count" form
-    const parenStr = (m[3] ?? m[4])?.trim() ?? null;               // paren from either form
-    const paren = parenStr ? parseCount(parenStr) : null;
-    if (main !== null || paren !== null) nonItalicEntries.set(yr, { main, paren });
-  }
+  // Collect non-italic (upcoming) entries. Parsing lives in m1Note.ts —
+  // handles both "Year N - 1,000 (opt_paren)" and paren-only "Year N - (1,000)".
+  const nonItalicEntries = extractNonItalicYearEntries(html);
 
   // For extension deals, infer the current year from the highest year in all entries
   let effectiveMsiYear = msiYear;
@@ -240,6 +236,7 @@ function parseM1Note(
     termYears,
     italicCount: italicEntries.size,
     italicYears: Array.from(italicEntries.keys()).sort((a, b) => a - b),
+    nonItalicYears: Array.from(nonItalicEntries.keys()).sort((a, b) => a - b),
   };
 }
 
@@ -716,6 +713,7 @@ export async function GET(req: NextRequest) {
         termYears: null,
         italicCount: 0,
         italicYears: [] as number[],
+        nonItalicYears: [] as number[],
       };
       const msiYear = parsed.msiYear ?? extractYearFromName(deal.properties?.dealname ?? "");
       const nextMsiYear = msiYear ? msiYear + 1 : null;
@@ -831,6 +829,7 @@ export async function GET(req: NextRequest) {
         noteHtml: parsed.m1NoteHtml,
         termYears: parsed.termYears ?? null,
         italicYears: parsed.italicYears ?? [],
+        nonItalicYears: parsed.nonItalicYears ?? [],
       });
 
       return {
@@ -873,17 +872,29 @@ export async function GET(req: NextRequest) {
     ]);
     // Belt and suspenders: skip instances already represented in the report
     // via the mop-up (deal found by date pool without a CSA-tier match).
-    const representedInEntries = (instName: string): boolean =>
-      entries.some(
+    // Three signals, because CSA↔HubSpot names can diverge completely (e.g.
+    // CSA "CKV Brethren Home" ↔ deal "Morefield"):
+    //   1. name match against entry company / CSA instance name
+    //   2. noc_instance_id match (entry's ID comes from the HubSpot company
+    //      association — independent of whether the CSA tiers resolved)
+    //   3. CSA domain root vs entry company ("morefield.com" ↔ "Morefield")
+    const representedInEntries = (inst: { instanceName: string; instanceId: number | null; domain: string | null }): boolean => {
+      const domainRoot = inst.domain
+        ? inst.domain.replace(/^www\./i, "").split(".")[0]
+        : null;
+      return entries.some(
         (e) =>
-          companyNamesMatch(e.company, instName) ||
-          (e.csaInstanceName ? companyNamesMatch(e.csaInstanceName, instName) : false)
+          companyNamesMatch(e.company, inst.instanceName) ||
+          (e.csaInstanceName ? companyNamesMatch(e.csaInstanceName, inst.instanceName) : false) ||
+          (inst.instanceId != null && e.nocInstanceId != null && e.nocInstanceId === inst.instanceId) ||
+          (domainRoot !== null && domainRoot.length >= 5 && companyNamesMatch(e.company, domainRoot))
       );
+    };
     const unmatchedCsaInstances = (csaResult?.instances ?? []).filter(
       (inst) =>
         !matchedCsaNames.has(inst.instanceName) &&
         inst.status !== "Disabled" && // churned accounts don't renew
-        !representedInEntries(inst.instanceName)
+        !representedInEntries(inst)
     );
     for (const inst of unmatchedCsaInstances) {
       const csaCount = inst.circuits ?? null;

@@ -73,6 +73,29 @@ export function extractItalicYearEntries(html: string): Map<number, number> {
 }
 
 /**
+ * Collect non-italic (not-yet-invoiced) year entries from the note.
+ * Returns year → { main, paren } counts. Expects entity-decoded HTML.
+ * Handles both "Year N - 1,000 (opt_paren)" and paren-only "Year N - (1,000)".
+ */
+export function extractNonItalicYearEntries(
+  html: string
+): Map<number, { main: number | null; paren: number | null }> {
+  const withoutItalics = html.replace(/<(?:em|i)[^>]*>[\s\S]*?<\/(?:em|i)>/gi, "");
+  const entries = new Map<number, { main: number | null; paren: number | null }>();
+  const niRe =
+    /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−:]\s*(?:([\d,]+)(?:\s*\(([^)]*)\))?|\(([^)]*)\))/gi;
+  let m: RegExpExecArray | null;
+  while ((m = niRe.exec(withoutItalics)) !== null) {
+    const yr = parseInt(m[1], 10);
+    const main = m[2] ? parseCount(m[2]) : null;
+    const parenStr = (m[3] ?? m[4])?.trim() ?? null;
+    const paren = parenStr ? parseCount(parenStr) : null;
+    if (main !== null || paren !== null) entries.set(yr, { main, paren });
+  }
+  return entries;
+}
+
+/**
  * Parse the term length M from the M1 note title line. This is the ONLY
  * source of M — never derive it from the bullet count.
  *   "3 Year M1 Order Form:"      → 3
@@ -129,6 +152,8 @@ export interface SheetNoteInput {
   termYears: number | null;
   /** Italicized (invoiced) MSI year numbers found in the note, ascending. */
   italicYears: number[];
+  /** Non-italic (not-yet-invoiced) MSI year numbers found in the note. */
+  nonItalicYears: number[];
 }
 
 /**
@@ -137,9 +162,14 @@ export interface SheetNoteInput {
  *  - Missing note or missing/unparseable title line → needs-review (these used
  *    to silently render "Auto-renewal", hiding data problems). The reason
  *    includes what the note's first line actually says.
- *  - italicCount > M (stray italicized FUTURE years inflating N) → needs-review,
- *    naming the specific year(s) that are the likely strays. Legitimate
- *    auto-renewal is exactly N === M + 1, i.e. italicCount === M.
+ *  - A CONTIGUOUS run of italicized years is trusted, including past the term:
+ *    the bookkeeping convention keeps italicizing each invoiced year as an
+ *    account auto-renews, so italicCount > M with an unbroken run simply means
+ *    the account has auto-renewed (italicCount − M) times → "Auto-renewal".
+ *  - A BROKEN run — an uninvoiced (non-italic or missing) year sitting BELOW
+ *    italicized years — is the real bad-data signature (a stray future year
+ *    italicized, or an invoiced year that lost its italics) → needs-review,
+ *    naming the specific years.
  *  - 1-year form whose only year is italicized → needs-review, naming the year
  *    and stating the rule applied. Under the italicCount+1 rule it computes
  *    N=2 > M=1 = Auto-renewal, but such accounts are often just in their
@@ -177,24 +207,37 @@ export function computeSheetNote(input: SheetNoteInput): SheetNoteResult {
   const M = termYears; // term length, from the title ONLY
   const N = italicCount + 1; // first uninvoiced year, 1-based position within this form
 
-  // Guard: more italic years than the term allows means a future year is
-  // italicized that shouldn't be. Rendering Auto-renewal here would be wrong.
-  // With contiguous years, the invoiced block is the first M italic years —
-  // anything after that is the likely stray.
-  if (italicCount > M) {
-    const strays = italicYears.slice(M);
-    return review(
-      `NEEDS REVIEW — ${italicCount} italicized years exceed the ${M}-year term (likely stray: ${fmtYears(strays)})`,
-      `The title says this is a ${M}-year form, but ${italicCount} years are italicized ` +
-        `(${fmtYears(italicYears)}). At most ${M} can have been invoiced, so the likely stray ` +
-        `${strays.length === 1 ? "is" : "are"} ${fmtYears(strays)} — de-italicize ` +
-        `${strays.length === 1 ? "it" : "them"} in the note if ${strays.length === 1 ? "it hasn't" : "they haven't"} actually been invoiced.`
-    );
+  // Guard: invoiced (italicized) years must form an unbroken run. An
+  // uninvoiced year sitting BELOW italicized years means either a stray
+  // future year was italicized or an invoiced year lost its italics —
+  // either way the year math can't be trusted.
+  if (italicCount > 0) {
+    const maxItalic = italicYears[italicYears.length - 1];
+    const uninvoicedBelow = input.nonItalicYears
+      .filter((y) => y < maxItalic)
+      .sort((a, b) => a - b);
+    const missingInRun: number[] = [];
+    for (let y = italicYears[0] + 1; y < maxItalic; y++) {
+      if (!italicYears.includes(y) && !input.nonItalicYears.includes(y)) {
+        missingInRun.push(y);
+      }
+    }
+    const broken = [...uninvoicedBelow, ...missingInRun].sort((a, b) => a - b);
+    if (broken.length) {
+      return review(
+        `NEEDS REVIEW — italicized years aren't a contiguous run (${fmtYears(broken)} uninvoiced below Year ${maxItalic})`,
+        `Invoiced (italicized) years must form an unbroken run, but ${fmtYears(broken)} ` +
+          `${broken.length === 1 ? "sits" : "sit"} uninvoiced below italicized Year ${maxItalic}. ` +
+          `Either de-italicize the stray future year(s) above, or italicize the invoiced year(s) below.`
+      );
+    }
   }
 
   if (N > M) {
-    // Here N === M + 1 exactly (every contracted year invoiced).
-    if (M === 1) {
+    // Every contracted year is invoiced. A contiguous run past the term means
+    // the account has auto-renewed (italicCount − M) times — normal bookkeeping,
+    // not bad data.
+    if (M === 1 && italicCount === 1) {
       // Ambiguous: often just the active final year, not a true auto-renewal.
       const yr = italicYears[0];
       return review(
