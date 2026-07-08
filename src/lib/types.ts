@@ -130,6 +130,11 @@ export interface RenewalEntry {
   /** True for synthetic rows created from a CSA renewal instance that matched
    *  no HubSpot deal. These have no deal to process — fix HubSpot first. */
   unmatchedCsa?: boolean;
+  /** Platform of the renewal: "MSI" (default) or "NOC360" (CSA-only rows,
+   *  reported in their own section and emailed separately). */
+  platform?: string | null;
+  /** Contracted license count straight from the CSA snapshot (NOC360 rows). */
+  csaLicenseCount?: number | null;
   /** Extension product names active for this company, e.g. ["POM", "Fiber Clarity"]. */
   extensionNames?: string[];
   processed?: boolean;

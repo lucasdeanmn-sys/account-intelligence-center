@@ -511,6 +511,14 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
                 <RefreshCw size={13} />
               </button>
             </div>
+          ) : entry.platform === "NOC360" ? (
+            <span
+              className="text-xs px-3 py-1.5"
+              style={{ color: "#64748b" }}
+              title="NOC360 renewal from CSA — reported to Joan via the section email, nothing to process here."
+            >
+              CSA renewal
+            </span>
           ) : entry.unmatchedCsa ? (
             <span
               className="text-xs px-3 py-1.5"
@@ -1015,7 +1023,7 @@ export default function MSITrackerPage() {
     setCancelEntry(null);
   }
 
-  async function generateEmail() {
+  async function generateEmail(platform: "MSI" | "NOC360" = "MSI") {
     setEmailLoading(true);
     try {
       const label = expirationDate
@@ -1023,12 +1031,17 @@ export default function MSITrackerPage() {
             month: "long", year: "numeric", timeZone: "UTC",
           })
         : "Renewals";
+      const emailDeals =
+        platform === "NOC360"
+          ? noc360Deals
+          : msiDeals.filter((d) => d.processed && !d.cancelled);
       const res = await fetch("/api/msi-renewals/email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          deals: deals.filter((d) => d.processed && !d.cancelled),
+          deals: emailDeals,
           monthLabel: label,
+          platform,
         }),
       });
       const data = await res.json();
@@ -1041,7 +1054,9 @@ export default function MSITrackerPage() {
     }
   }
 
-  const processedCount = deals.filter((d) => d.processed).length;
+  const msiDeals = deals.filter((d) => d.platform !== "NOC360");
+  const noc360Deals = deals.filter((d) => d.platform === "NOC360");
+  const processedCount = msiDeals.filter((d) => d.processed).length;
   const expLabel = expirationDate
     ? new Date(expirationDate + "T00:00:00.000Z").toLocaleDateString("en-US", {
         month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
@@ -1133,12 +1148,12 @@ export default function MSITrackerPage() {
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-4">
             <p className="text-sm font-medium text-white">
-              {deals.length} deal{deals.length !== 1 ? "s" : ""} expiring{" "}
+              {msiDeals.length} MSI deal{msiDeals.length !== 1 ? "s" : ""} expiring{" "}
               {expLabel && <span style={{ color: "#6366f1" }}>{expLabel}</span>}
             </p>
             {processedCount > 0 && (
               <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: "#22c55e20", color: "#22c55e" }}>
-                {processedCount} / {deals.length} processed
+                {processedCount} / {msiDeals.length} processed
               </span>
             )}
           </div>
@@ -1157,8 +1172,8 @@ export default function MSITrackerPage() {
               </span>
             ) : null}
             <button
-              onClick={generateEmail}
-              disabled={emailLoading || deals.length === 0}
+              onClick={() => generateEmail("MSI")}
+              disabled={emailLoading || msiDeals.length === 0}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
               style={{ borderColor: "#252836", color: "#94a3b8" }}
             >
@@ -1183,9 +1198,9 @@ export default function MSITrackerPage() {
         </div>
       )}
 
-      {/* Deal rows */}
+      {/* Deal rows — MSI */}
       <div className="space-y-2">
-        {deals.map((entry) => (
+        {msiDeals.map((entry) => (
           <DealRow
             key={entry.currentDealId}
             entry={entry}
@@ -1195,6 +1210,50 @@ export default function MSITrackerPage() {
           />
         ))}
       </div>
+
+      {/* NOC360 renewals — CSA-only rows, emailed separately (to Joan) */}
+      {noc360Deals.length > 0 && (
+        <div className="mt-8">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-semibold text-white">
+              NOC360 Renewals{" "}
+              <span className="font-normal" style={{ color: "#64748b" }}>
+                ({noc360Deals.length})
+              </span>
+            </p>
+            <button
+              onClick={() => generateEmail("NOC360")}
+              disabled={emailLoading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
+              style={{ borderColor: "#252836", color: "#94a3b8" }}
+            >
+              {emailLoading ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />}
+              Generate Email (Joan)
+            </button>
+          </div>
+          <div className="hidden sm:flex items-center gap-4 px-4 mb-2">
+            <div className="flex-1" />
+            <div className="flex items-center gap-6">
+              <p className="text-xs w-20 text-right" style={{ color: "#475569" }}>License</p>
+              <p className="text-xs w-20 text-right" style={{ color: "#475569" }}>CSA</p>
+              <p className="text-xs w-24 text-right" style={{ color: "#475569" }}>Rounded</p>
+              <p className="text-xs w-28 text-right" style={{ color: "#475569" }}>Renewal Count</p>
+              <div className="w-[104px]" />
+            </div>
+          </div>
+          <div className="space-y-2">
+            {noc360Deals.map((entry) => (
+              <DealRow
+                key={entry.currentDealId}
+                entry={entry}
+                onProcess={(e) => setConfirmEntry(e)}
+                onCancel={(e) => setCancelEntry(e)}
+                onUnprocess={handleUnprocess}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* CSA Mapping — shown after a fetch when some companies didn't auto-match */}
       {csaInstances.length > 0 && deals.some((d) => d.csaCount === null) && (

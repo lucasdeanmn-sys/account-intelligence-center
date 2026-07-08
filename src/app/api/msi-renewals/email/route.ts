@@ -11,12 +11,17 @@ const RECIPIENTS = [
   "jtermaat@7sigma.com",
 ];
 
+// NOC360 renewals are internal — they go only to Joan.
+const RECIPIENTS_NOC360 = ["jtermaat@7sigma.com"];
+
 export async function POST(req: NextRequest) {
   try {
-    const { deals, monthLabel } = await req.json() as {
+    const { deals, monthLabel, platform } = await req.json() as {
       deals: RenewalEntry[];
       monthLabel: string;
+      platform?: "MSI" | "NOC360";
     };
+    const isNoc360 = platform === "NOC360";
 
     if (!deals?.length) {
       return NextResponse.json({ error: "deals array required" }, { status: 400 });
@@ -26,6 +31,10 @@ export async function POST(req: NextRequest) {
 
     const formatLine = (d: RenewalEntry): string => {
       const count = d.renewalCount?.toLocaleString() ?? "TBD";
+      if (isNoc360) {
+        // NOC360 lines are plain company + count — no M1 note/extension context.
+        return `• ${d.company} — ${count}`;
+      }
       // Shorten "Year X of Y on existing M1 agreement" → "Year X of Y"
       const note = d.sheetNote
         ? d.sheetNote.replace(/\s+on existing M1 agreement$/i, "")
@@ -38,27 +47,42 @@ export async function POST(req: NextRequest) {
       return `• ${d.company} — ${count}${notePart}`;
     };
 
-    const subject = `MSI ${monthLabel} Renewal`;
+    const subject = isNoc360
+      ? `NOC360 ${monthLabel} Renewal`
+      : `MSI ${monthLabel} Renewal`;
 
-    const bodyParts = [
-      `Hi Team,`,
-      ``,
-      `Please see the ${monthLabel} MSI renewal list below. Licenses have been updated in NOC360 accordingly.`,
-      ``,
-      ...renewals.map(formatLine),
-      ``,
-      `Please let me know if you have any questions.`,
-      ``,
-      `Thanks,`,
-      `Luke`,
-    ];
+    const bodyParts = isNoc360
+      ? [
+          `Hi Joan,`,
+          ``,
+          `Please see the ${monthLabel} NOC360 renewal list below.`,
+          ``,
+          ...renewals.map(formatLine),
+          ``,
+          `Please let me know if you have any questions.`,
+          ``,
+          `Thanks,`,
+          `Luke`,
+        ]
+      : [
+          `Hi Team,`,
+          ``,
+          `Please see the ${monthLabel} MSI renewal list below. Licenses have been updated in NOC360 accordingly.`,
+          ``,
+          ...renewals.map(formatLine),
+          ``,
+          `Please let me know if you have any questions.`,
+          ``,
+          `Thanks,`,
+          `Luke`,
+        ];
 
     const body = bodyParts.join("\n");
 
     return NextResponse.json({
       subject,
       body,
-      to: RECIPIENTS,
+      to: isNoc360 ? RECIPIENTS_NOC360 : RECIPIENTS,
     });
   } catch (error: any) {
     console.error("MSI email generation error:", error);

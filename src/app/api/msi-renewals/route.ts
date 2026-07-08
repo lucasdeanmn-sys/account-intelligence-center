@@ -354,14 +354,20 @@ export async function GET(req: NextRequest) {
     // Debug info: track how each CSA instance was resolved (for troubleshooting)
     const _csaDebug: { instance: string; method: string; dealName?: string }[] = [];
 
-    if (csaResult?.instances?.length) {
+    // Partition CSA renewals by platform: MSI instances go through deal
+    // matching; NOC360 instances become CSA-only report rows (own section,
+    // own email) and never touch the MSI deal-matching tiers.
+    const msiInstances = (csaResult?.instances ?? []).filter((i) => i.platform !== "NOC360");
+    const noc360Instances = (csaResult?.instances ?? []).filter((i) => i.platform === "NOC360");
+
+    if (msiInstances.length) {
       // CSA is the authoritative list. For each CSA instance, find its HubSpot deal:
       //   Tier 1 — startDate pool (fastest: already fetched, no extra API call)
       //   Tier 2 — instanceId → company → deals (reliable: bypasses name matching entirely)
       //   Tier 3 — name-based token search (last resort for companies missing an instanceId)
-      const needFallback: typeof csaResult.instances = [];
+      const needFallback: typeof msiInstances = [];
 
-      for (const inst of csaResult.instances) {
+      for (const inst of msiInstances) {
         // Tier 1a: subscription_start_date pool
         // Tier 1b: closeDate pool (catches companies with non-standard ssd, e.g. June 19)
         let found: any = null;
@@ -402,7 +408,7 @@ export async function GET(req: NextRequest) {
           )
         );
 
-        const needNameSearch: typeof csaResult.instances = [];
+        const needNameSearch: typeof msiInstances = [];
 
         for (let i = 0; i < needFallback.length; i++) {
           const res = instanceIdResults[i];
@@ -566,7 +572,7 @@ export async function GET(req: NextRequest) {
       // renewal is in a different period — don't pull their old HubSpot deal into
       // this report via mop-up.  (e.g. Fiber Connect expires 5/31/2027 — an old
       // July 2025 deal exists in HubSpot but should not appear in June 2026.)
-      const currentMonthCsaNames = (csaResult?.instances ?? []).map(i => i.instanceName);
+      const currentMonthCsaNames = msiInstances.map(i => i.instanceName);
       const isInOtherMonthCsa = (coName: string): boolean => {
         if (!csaResult) return false;
         const inCurrent = currentMonthCsaNames.some(n => companyNamesMatch(n, coName));
@@ -855,6 +861,7 @@ export async function GET(req: NextRequest) {
         sheetNote: noteResult.sheetNote,
         needsReview: noteResult.needsReview,
         needsReviewReason: noteResult.needsReviewReason,
+        platform: "MSI",
         extensionNames,
         processed,
         cancelled,
@@ -890,7 +897,7 @@ export async function GET(req: NextRequest) {
           (domainRoot !== null && domainRoot.length >= 5 && companyNamesMatch(e.company, domainRoot))
       );
     };
-    const unmatchedCsaInstances = (csaResult?.instances ?? []).filter(
+    const unmatchedCsaInstances = msiInstances.filter(
       (inst) =>
         !matchedCsaNames.has(inst.instanceName) &&
         inst.status !== "Disabled" && // churned accounts don't renew
@@ -930,10 +937,59 @@ export async function GET(req: NextRequest) {
           `Check: (a) the current-year deal's subscription_start_date, (b) whether the deal name ` +
           `matches the CSA instance name, or (c) whether this is a sub-tenant instance with no deal of its own.`,
         unmatchedCsa: true,
+        platform: "MSI",
         extensionNames: [],
         processed: false,
         cancelled: false,
         multiTenant: inst.instanceId != null && multiTenantIds.has(inst.instanceId),
+      });
+    }
+
+    // NOC360 renewals: CSA-only rows. No HubSpot deal matching, no processing,
+    // no needs-review — informational, reported in their own section and
+    // emailed separately. Order Form column shows the CSA license count;
+    // renewal count mirrors the MSI billing rule (max of license vs rounded
+    // actual usage).
+    for (const inst of noc360Instances) {
+      if (inst.status === "Disabled") continue;
+      const csaCount = inst.circuits ?? null;
+      const csaRounded =
+        csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
+      const lic = inst.licenseCount ?? null;
+      const renewalCount =
+        lic !== null || csaRounded !== null
+          ? Math.max(lic ?? 0, csaRounded ?? 0)
+          : null;
+      entries.push({
+        currentDealId: `csa-noc360:${inst.instanceName}`,
+        currentDealName: "NOC360 renewal (from CSA)",
+        company: inst.instanceName,
+        hasExtension: false,
+        msiYear: null,
+        nextMsiYear: null,
+        orderFormLicense: lic,
+        currentYearLicense: null,
+        csaCount,
+        csaRounded,
+        renewalCount,
+        renewalDealId: null,
+        renewalDealName: `${inst.instanceName} (NOC360)`,
+        renewalStartDate,
+        expirationDate,
+        m1NoteHtml: null,
+        m1NoteId: null,
+        nocInstanceId: inst.instanceId ?? null,
+        csaInstanceName: inst.instanceName,
+        sheetNote: "NOC360 renewal",
+        needsReview: false,
+        needsReviewReason: null,
+        unmatchedCsa: false,
+        platform: "NOC360",
+        csaLicenseCount: lic,
+        extensionNames: [],
+        processed: false,
+        cancelled: false,
+        multiTenant: false,
       });
     }
 

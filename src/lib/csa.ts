@@ -26,6 +26,10 @@ export interface CsaInstance {
   domain: string | null;
   /** CSA account status (Production / Staging / Disabled). */
   status: string | null;
+  /** CSA platform (MSI / NOC360). */
+  platform: string | null;
+  /** Contracted license count from the CSA snapshot. */
+  licenseCount: number | null;
 }
 
 interface CsaRecord {
@@ -35,6 +39,10 @@ interface CsaRecord {
   renewalDate: string | null;
   /** CSA account status (Production / Staging / Disabled). */
   status: string | null;
+  /** CSA platform (MSI / NOC360). */
+  platform: string | null;
+  /** Contracted license count from the CSA snapshot. */
+  licenseCount: number | null;
 }
 
 // ─── MCP SSE helper ───────────────────────────────────────────────────────────
@@ -230,6 +238,10 @@ async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: Cs
       domain: (r.domain as string | null) ?? null,
       renewalDate: (r.renewal_date as string | null) ?? null,
       status: (r.status as string | null) ?? null,
+      platform: (r.platform as string | null) ?? null,
+      licenseCount: r.license_count != null && !isNaN(parseInt(String(r.license_count), 10))
+        ? parseInt(String(r.license_count), 10)
+        : null,
     }));
 
   const allInstances: CsaInstance[] = records.map((r) => ({
@@ -238,6 +250,8 @@ async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: Cs
     circuits: r.circuits,
     domain: r.domain,
     status: r.status,
+    platform: r.platform,
+    licenseCount: r.licenseCount,
   }));
 
   return { records, allInstances };
@@ -315,7 +329,11 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
     }
   };
   const results = await Promise.allSettled(
-    targets.map((r) => callWithRetry(r.instance))
+    targets.map((r) =>
+      r.platform === "NOC360"
+        ? Promise.resolve(null) // NOC360 renewals skip MSI deal matching — no ID needed
+        : callWithRetry(r.instance)
+    )
   );
 
   const resolvedInstances: CsaInstance[] = [];
@@ -361,6 +379,8 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
       circuits,
       domain: target.domain,
       status: target.status,
+      platform: target.platform,
+      licenseCount: target.licenseCount,
     });
   }
 
