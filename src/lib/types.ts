@@ -121,6 +121,12 @@ export interface RenewalEntry {
   csaInstanceName?: string | null;
   /** Human-readable note to write to the sheet Notes column. */
   sheetNote?: string | null;
+  /** True when the M1 note failed a sanity check (missing/garbled title line,
+   *  italicized years exceeding the term, or an ambiguous fully-italicized
+   *  1-year form). The note needs manual cleanup — don't trust the year math. */
+  needsReview?: boolean;
+  /** Why the entry was flagged for review (null when needsReview is false). */
+  needsReviewReason?: string | null;
   /** Extension product names active for this company, e.g. ["POM", "Fiber Clarity"]. */
   extensionNames?: string[];
   processed?: boolean;

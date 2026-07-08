@@ -421,6 +421,12 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
                 Multi-tenant
               </span>
             )}
+            {entry.needsReview && (
+              <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#ef444415", color: "#ef4444" }}
+                title={entry.needsReviewReason ?? "M1 note failed a sanity check — review the note before trusting the year math."}>
+                Needs Review
+              </span>
+            )}
             {entry.orderFormLicense === null && entry.currentYearLicense !== null && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#3b82f615", color: "#60a5fa" }}>
                 Auto-renew

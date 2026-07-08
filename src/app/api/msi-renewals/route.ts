@@ -4,6 +4,7 @@ import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
 import type { RenewalEntry } from "@/lib/types";
+import { parseCount, decodeNoteEntities, extractItalicYearEntries, parseTermYears, computeSheetNote } from "@/lib/m1Note";
 
 export const maxDuration = 90;
 export const dynamic = "force-dynamic";
@@ -59,11 +60,6 @@ function addOneYear(isoDate: string): string {
   return d.toISOString().split("T")[0];
 }
 
-function parseCount(s: string): number | null {
-  const n = parseInt(s.replace(/,/g, ""), 10);
-  return isNaN(n) ? null : n;
-}
-
 interface M1Parsed {
   dealId: string;
   msiYear: number | null;
@@ -80,33 +76,13 @@ interface M1Parsed {
   italicCount: number;
 }
 
-// Parse the integer from the M1 note title line:
-//   "3 Year M1 Order Form:"      → 3
-//   "Updated 3 year M1 Order:"   → 3
-function parseTermYears(html: string): number | null {
-  const m = html.match(/(?:updated\s+)?(\d+)\s+years?\s+m1\s+order/i);
-  return m ? parseInt(m[1], 10) : null;
-}
-
-// Derive a human-readable sheet note from the parsed M1 data.
-//   M = termYears (from the note title)
-//   N = italicCount + 1 (next year to be invoiced)
-//   N > M → "Auto-renewal" (beyond the contracted term)
-//   else  → "Year N of M on existing M1 agreement"
-function computeSheetNote(
-  orderFormLicense: number | null,
-  nextMsiYear: number | null,
-  termYears: number | null,
-  italicCount: number
-): string {
-  if (!nextMsiYear) return "Auto-renewal";
-  const M = termYears;
-  if (!M) return "Auto-renewal";
-  const N = italicCount + 1;
-  if (N > M) return "Auto-renewal";
-  if (M === 1) return `Year ${N} on existing M1 agreement`;
-  return `Year ${N} of ${M} on existing M1 agreement`;
-}
+// Sheet note derivation now lives in src/lib/m1Note.ts (computeSheetNote):
+//   M = termYears — parsed ONLY from the note title, never the bullet count
+//   N = italicCount + 1 — position within this order form, not cumulative year
+//   N <= M     → "Year N of M on existing M1 agreement"
+//   N == M + 1 → "Auto-renewal"
+//   Missing/garbled title, italicCount > M, or a fully-italicized 1-year form
+//   → needs-review (fail loud), never a silent "Auto-renewal" and never a crash.
 
 function parseM1Note(
   dealId: string,
@@ -177,36 +153,13 @@ function parseM1Note(
 
   // Decode common HTML entities that HubSpot may store (e.g. &ndash; for –) so
   // the dash-matching regexes below work regardless of how the note was typed.
-  const html = rawHtml
-    .replace(/&ndash;/gi, "–")
-    .replace(/&mdash;/gi, "—")
-    .replace(/&minus;/gi, "−")
-    .replace(/&#8211;/gi, "–")
-    .replace(/&#8212;/gi, "—")
-    .replace(/&#x2013;/gi, "–")
-    .replace(/&#x2014;/gi, "—")
-    .replace(/&nbsp;/gi, " ");
+  const html = decodeNoteEntities(rawHtml);
 
-  // Year entry pattern: matches all three forms:
-  //   "MSI Year N - X,XXX"          → group 2 = main count
-  //   "MSI Year N - X,XXX (Y,YYY)"  → group 2 = main count (paren ignored here)
-  //   "MSI Year N - (X,XXX)"        → group 3 = paren-only count
-  const yearEntryRe = /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−:]\s*(?:([\d,]+)(?:\s*\([^)]*\))?|\((\d[\d,]*)\))/i;
-
-  // Collect italic (already-invoiced) entries
-  const italicEntries = new Map<number, number>();
-  const italicRe = /<(?:em|i)[^>]*>([\s\S]*?)<\/(?:em|i)>/gi;
+  // Collect italic (already-invoiced) entries: year → count.
+  // (Regex details live in m1Note.ts — YEAR_ENTRY_RE handles all three
+  // "MSI Year N - count" forms.)
+  const italicEntries = extractItalicYearEntries(html);
   let m: RegExpExecArray | null;
-  while ((m = italicRe.exec(html)) !== null) {
-    const inner = m[1];
-    const hit = inner.match(yearEntryRe);
-    if (hit) {
-      const yr = parseInt(hit[1], 10);
-      // Group 2 = main count; group 3 = paren-only count
-      const cnt = hit[2] ? parseCount(hit[2]) : (hit[3] ? parseCount(hit[3]) : null);
-      if (cnt !== null) italicEntries.set(yr, cnt);
-    }
-  }
 
   // Collect non-italic (upcoming) entries.
   // Handles both "Year N - 1,000 (opt_paren)" and paren-only "Year N - (1,000)".
@@ -842,6 +795,15 @@ export async function GET(req: NextRequest) {
         (svcTerminated && svcTerminated !== CANCEL_SENTINEL)
       );
 
+      // Sheet note: M comes ONLY from the note title, N from the italic count.
+      // Missing note / garbled title / stray italics → needs-review, never a
+      // silent "Auto-renewal" and never a crash.
+      const noteResult = computeSheetNote(
+        parsed.m1NoteHtml !== null,
+        parsed.termYears ?? null,
+        parsed.italicCount ?? 0
+      );
+
       return {
         currentDealId: deal.id,
         currentDealName: dealName,
@@ -862,7 +824,9 @@ export async function GET(req: NextRequest) {
         m1NoteId: parsed.m1NoteId ?? null,
         nocInstanceId,
         csaInstanceName,
-        sheetNote: computeSheetNote(orderFormLicense, nextMsiYear, parsed.termYears ?? null, parsed.italicCount ?? 0),
+        sheetNote: noteResult.sheetNote,
+        needsReview: noteResult.needsReview,
+        needsReviewReason: noteResult.needsReviewReason,
         extensionNames,
         processed,
         cancelled,
