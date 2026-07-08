@@ -40,11 +40,14 @@ function extractCompany(dealName: string): string {
 // Handles regular hyphen, en dash, and em dash
 function extractYearFromName(dealName: string): number | null {
   // Matches all formats:
-  //   "MSI - Year N"   → standard format (dash before Year)
-  //   "MSI Year N"     → no dash
-  //   "MSI Year - N"   → non-standard (dash after Year, e.g. Fiber Connect)
-  //   "MSI – Year N"   → en dash variants
-  const m = dealName.match(/MSI\s*[-–—]?\s*Year\s*[-–—]?\s*(\d+)/i);
+  //   "MSI - Year N"        → standard format (dash before Year)
+  //   "MSI Year N"          → no dash
+  //   "MSI Year - N"        → non-standard (dash after Year, e.g. Fiber Connect)
+  //   "MSI – Year N"        → en dash variants
+  //   "MSI Reboot - Year N" → one interstitial word (e.g. UCS churn-and-return
+  //     "Reboot" deals). Without this, Reboot deals parsed as year 0 and lost
+  //     the candidate sort to old churned deals with higher year numbers.
+  const m = dealName.match(/MSI(?:\s+\w+)?\s*[-–—]?\s*Year\s*[-–—]?\s*(\d+)/i);
   return m ? parseInt(m[1], 10) : null;
 }
 
