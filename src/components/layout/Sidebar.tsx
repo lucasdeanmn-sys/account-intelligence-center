@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   Search,
   RefreshCw,
+  Target,
   Zap,
 } from "lucide-react";
 
@@ -12,6 +13,7 @@ const nav = [
   { href: "/", icon: LayoutDashboard, label: "Daily Priorities" },
   { href: "/account", icon: Search, label: "Account Deep-Dive" },
   { href: "/msi-tracker", icon: RefreshCw, label: "MSI Renewals" },
+  { href: "/targets", icon: Target, label: "AIC Targets" },
 ];
 
 export default function Sidebar() {
