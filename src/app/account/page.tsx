@@ -347,7 +347,7 @@ function AccountPageContent() {
           />
           {showPushModal && briefing && (
             <PushToHubSpot
-              dealId={briefing.dealName}
+              dealId={briefing.dealId ?? ""}
               dealName={briefing.dealName}
               company={briefing.company}
               onClose={() => setShowPushModal(false)}

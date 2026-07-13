@@ -47,6 +47,8 @@ export interface HubSpotTask {
 }
 
 export interface AccountBriefing {
+  /** HubSpot deal object ID — attached server-side (not LLM output); required for note/task/line-item associations */
+  dealId?: string;
   dealName: string;
   company: string;
   dealStage?: string;

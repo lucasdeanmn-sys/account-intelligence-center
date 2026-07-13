@@ -133,6 +133,13 @@ Use the deal, contact, notes, and task data above to generate the JSON briefing.
       if (briefing.isMSI && !briefing.recommendedNextStep.includes("Adtran")) {
         briefing.recommendedNextStep = `Contact Adtran territory manager first. Then: ${briefing.recommendedNextStep}`;
       }
+      // Attach the real HubSpot deal ID server-side — the LLM only echoes
+      // names, and PushToHubSpot needs the object ID for associations.
+      // Match on the deal name Claude chose; fall back to the top result.
+      const matched = enriched.find(
+        (d: any) => d.dealname === briefing.dealName
+      );
+      briefing.dealId = matched?.id ?? enriched[0]?.id;
     } catch {
       return NextResponse.json(
         { briefing: null, rawResponse: result },
