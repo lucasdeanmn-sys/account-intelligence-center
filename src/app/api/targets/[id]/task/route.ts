@@ -1,48 +1,64 @@
 // app/api/targets/[id]/task/route.ts
 // POST /api/targets/:id/task  -> creates a HubSpot outreach task on the company,
-// pre-filled with the current score breakdown as the "why now" reasons.
-// Wire the list page's button to this endpoint.
+// pre-filled with the score breakdown, a compact account-history summary, and
+// (when the client generated one) the AI outreach draft.
+//
+// Idempotent: if an open "Outreach: <company> (AIC target)" task already
+// exists, its id is returned with existing: true instead of creating a dupe.
 
 import { NextResponse } from "next/server";
-import { createOutreachTask } from "@/lib/hubspot/tasks";
-import { HUBSPOT_PROPS as P } from "@/lib/scoring/config";
+import {
+  createOutreachTask,
+  findOpenOutreachTask,
+} from "@/lib/hubspot/tasks";
+import { getTargetContext, buildHistoryLines } from "@/lib/targets/context";
 
-const BASE = "https://api.hubapi.com";
+export const maxDuration = 30;
 
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
-  // Pull current name + breakdown so the task explains itself.
-  const res = await fetch(
-    `${BASE}/crm/v3/objects/companies/${id}?properties=${P.NAME},${P.BREAKDOWN}`,
-    {
-      headers: { Authorization: `Bearer ${process.env.HUBSPOT_ACCESS_TOKEN}` },
-      cache: "no-store",
+  // Optional body: the AI draft from the expanded panel rides along into the task.
+  let suggestion: { emailSubject: string; emailBody: string; callPoints: string[] } | null = null;
+  try {
+    const body = await request.json();
+    if (body?.suggestion?.emailSubject && body?.suggestion?.emailBody) {
+      suggestion = {
+        emailSubject: String(body.suggestion.emailSubject),
+        emailBody: String(body.suggestion.emailBody),
+        callPoints: Array.isArray(body.suggestion.callPoints)
+          ? body.suggestion.callPoints.map(String)
+          : [],
+      };
     }
-  );
-  if (!res.ok) {
-    return NextResponse.json({ error: await res.text() }, { status: res.status });
-  }
-  const company = await res.json();
-  const name = company.properties?.[P.NAME] ?? "(unnamed)";
-
-  let reasons: string[] = [];
-  try {
-    const breakdown = JSON.parse(company.properties?.[P.BREAKDOWN] ?? "{}");
-    reasons = [...(breakdown.trigger ?? []), ...(breakdown.fit ?? [])].map(
-      (c: { label: string; points: number; detail?: string }) =>
-        `${c.label} (+${c.points})${c.detail ? ` — ${c.detail}` : ""}`
-    );
   } catch {
-    reasons = ["Score breakdown unavailable — see company record."];
+    // no body — fine
   }
 
   try {
-    const taskId = await createOutreachTask({ companyId: id, companyName: name, reasons });
-    return NextResponse.json({ ok: true, taskId });
+    // Deals + notes only — skip the slower Fathom/Gmail calls so the button
+    // stays snappy; call mentions are already reflected in the score reasons.
+    const context = await getTargetContext(id, { includeSignals: false });
+    const name = context.company.name;
+
+    const existingId = await findOpenOutreachTask(name);
+    if (existingId) {
+      return NextResponse.json({ ok: true, taskId: existingId, existing: true });
+    }
+
+    const taskId = await createOutreachTask({
+      companyId: id,
+      companyName: name,
+      reasons: context.reasons.length
+        ? context.reasons
+        : ["Score breakdown unavailable — see company record."],
+      historyLines: buildHistoryLines(context),
+      suggestion,
+    });
+    return NextResponse.json({ ok: true, taskId, existing: false });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

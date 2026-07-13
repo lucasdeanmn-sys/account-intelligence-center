@@ -11,23 +11,76 @@ export interface OutreachTaskInput {
   companyName: string;
   reasons: string[]; // score component labels, e.g. from aic_score_breakdown
   dueInDays?: number; // default 2 business-ish days
+  historyLines?: string[]; // compact account history (deals, mentions, email recency)
+  suggestion?: {
+    emailSubject: string;
+    emailBody: string;
+    callPoints: string[];
+  } | null; // AI outreach draft generated from the expanded panel
+}
+
+export function outreachTaskSubject(companyName: string): string {
+  return `Outreach: ${companyName} (AIC target)`;
+}
+
+// Idempotency guard: an open task with this exact subject already covers the
+// company — return its id so the button can't create duplicates across
+// reloads or double clicks.
+export async function findOpenOutreachTask(companyName: string): Promise<string | null> {
+  const res = await fetch(`${BASE}/crm/v3/objects/tasks/search`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.HUBSPOT_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      filterGroups: [
+        {
+          filters: [
+            { propertyName: "hs_task_subject", operator: "EQ", value: outreachTaskSubject(companyName) },
+            { propertyName: "hs_task_status", operator: "NEQ", value: "COMPLETED" },
+          ],
+        },
+      ],
+      properties: ["hs_task_subject"],
+      limit: 1,
+    }),
+  });
+  if (!res.ok) return null; // guard is best-effort — fall through to create
+  const data = await res.json();
+  return data.results?.length ? String(data.results[0].id) : null;
 }
 
 export async function createOutreachTask(input: OutreachTaskInput): Promise<string> {
   const due = new Date(Date.now() + (input.dueInDays ?? 2) * 86_400_000);
   due.setUTCHours(17, 0, 0, 0); // noon Central-ish
 
+  const sections: string[] = [
+    `Surfaced by Account Intelligence Center scoring.`,
+    ``,
+    `Why now:`,
+    ...input.reasons.map((r) => `- ${r}`),
+  ];
+  if (input.historyLines?.length) {
+    sections.push(``, `Account history:`, ...input.historyLines.map((l) => `- ${l}`));
+  }
+  if (input.suggestion) {
+    sections.push(
+      ``,
+      `Suggested email (AI draft — review before sending):`,
+      `Subject: ${input.suggestion.emailSubject}`,
+      input.suggestion.emailBody
+    );
+    if (input.suggestion.callPoints?.length) {
+      sections.push(``, `Call points:`, ...input.suggestion.callPoints.map((p) => `- ${p}`));
+    }
+  }
+  sections.push(``, `Created by Account Intelligence Center.`);
+
   const body = {
     properties: {
-      hs_task_subject: `Outreach: ${input.companyName} (AIC target)`,
-      hs_task_body: [
-        `Surfaced by Account Intelligence Center scoring.`,
-        ``,
-        `Why now:`,
-        ...input.reasons.map((r) => `- ${r}`),
-        ``,
-        `Created by Account Intelligence Center.`,
-      ].join("\n"),
+      hs_task_subject: outreachTaskSubject(input.companyName),
+      hs_task_body: sections.join("\n"),
       hs_task_status: "NOT_STARTED",
       hs_task_priority: "HIGH",
       hs_task_type: "TODO",

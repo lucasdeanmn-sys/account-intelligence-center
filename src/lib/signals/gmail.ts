@@ -9,7 +9,7 @@
 import { SCORING_CONFIG as C } from "../scoring/config";
 import type { CompanyRecord } from "../scoring/types";
 
-async function getAccessToken(): Promise<string | null> {
+export async function getAccessToken(): Promise<string | null> {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) return null;
 
@@ -30,7 +30,7 @@ async function getAccessToken(): Promise<string | null> {
   return (await res.json()).access_token ?? null;
 }
 
-async function latestInboundDays(token: string, domain: string): Promise<number | null> {
+export async function latestInboundDays(token: string, domain: string): Promise<number | null> {
   const q = `from:${domain} newer_than:${C.signals.gmailLookbackDays}d`;
   const listRes = await fetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=1`,
