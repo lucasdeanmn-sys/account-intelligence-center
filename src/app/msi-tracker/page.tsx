@@ -730,7 +730,7 @@ export default function MSITrackerPage() {
   const [confirmEntry, setConfirmEntry] = useState<RenewalEntry | null>(null);
   const [cancelEntry, setCancelEntry] = useState<RenewalEntry | null>(null);
   const [sheetWarning, setSheetWarning] = useState<string | null>(null);
-  const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[] } | null>(null);
+  const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[]; deals: RenewalEntry[] } | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
   const [csaInstances, setCsaInstances] = useState<CsaInstance[]>([]);
   const [csaError, setCsaError] = useState<string | null>(null);
@@ -1063,7 +1063,10 @@ export default function MSITrackerPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      setEmailModal(data);
+      // Carry the filtered list into the modal so "Update M1 Notes" only
+      // touches the deals actually included in the email — not cancelled or
+      // unprocessed ones.
+      setEmailModal({ ...data, deals: emailDeals });
     } catch (e: any) {
       setError(e.message || "Failed to generate email");
     } finally {
@@ -1318,7 +1321,7 @@ export default function MSITrackerPage() {
           subject={emailModal.subject}
           body={emailModal.body}
           to={emailModal.to}
-          deals={deals}
+          deals={emailModal.deals}
           onClose={() => setEmailModal(null)}
         />
       )}
