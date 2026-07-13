@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { callClaude, extractJSON } from "@/lib/anthropic";
-import { searchDeals, getDealNotes } from "@/lib/hubspot";
+import { searchDeals, getDealNotesBatch } from "@/lib/hubspot";
 import type { MSIDeal } from "@/lib/types";
 
 export const maxDuration = 180;
@@ -89,14 +89,14 @@ export async function GET() {
       d.properties?.dealname?.includes("(MSI")
     );
 
-    // Fetch notes for all MSI deals in parallel
-    const notesPerDeal = await Promise.all(
-      msiDeals.map((d: any) => getDealNotes(d.id).catch(() => [] as any[]))
-    );
+    // Fetch notes for all MSI deals via the batched association path
+    const notesByDealId = await getDealNotesBatch(
+      msiDeals.map((d: any) => String(d.id))
+    ).catch(() => new Map<string, any[]>());
 
     // Build enriched deal context for Claude
-    const enriched = msiDeals.map((deal: any, i: number) => {
-      const notes: any[] = notesPerDeal[i] ?? [];
+    const enriched = msiDeals.map((deal: any) => {
+      const notes: any[] = notesByDealId.get(String(deal.id)) ?? [];
       return {
         id: deal.id,
         name: deal.properties?.dealname,

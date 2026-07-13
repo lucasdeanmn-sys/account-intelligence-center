@@ -88,6 +88,117 @@ async function fetchNotesByIds(ids: string[]): Promise<any[]> {
   return batchRead("notes", ids, ["hs_note_body", "hs_timestamp"]).catch(() => []);
 }
 
+// Batch-read v4 associations for many objects at once (up to 1000 inputs per
+// call) instead of one GET per object. Returns Map<fromId, toIds[]>. A failed
+// chunk degrades to empty results, matching the .catch(() => ({ results: [] }))
+// behaviour of the per-object helpers.
+async function batchReadAssociations(
+  fromType: string,
+  toType: string,
+  ids: string[]
+): Promise<Map<string, string[]>> {
+  const map = new Map<string, string[]>();
+  if (!ids.length) return map;
+  for (let i = 0; i < ids.length; i += 1000) {
+    const res = await hs(
+      "POST",
+      `/crm/v4/associations/${fromType}/${toType}/batch/read`,
+      { inputs: ids.slice(i, i + 1000).map((id) => ({ id })) }
+    ).catch(() => ({ results: [] }));
+    for (const row of res.results ?? []) {
+      const fromId = String(row.from?.id ?? "");
+      if (!fromId) continue;
+      const toIds = (row.to ?? [])
+        .map((t: any) => String(t.toObjectId ?? ""))
+        .filter(Boolean);
+      const existing = map.get(fromId);
+      if (existing) existing.push(...toIds);
+      else map.set(fromId, toIds);
+    }
+  }
+  return map;
+}
+
+// Deal → associated company IDs for many deals in ~1 API call. Shared between
+// getDealNotesBatch and getDealCompanyNocIds so the associations are only
+// fetched once per request.
+export async function getDealCompanyMap(
+  dealIds: string[]
+): Promise<Map<string, string[]>> {
+  return batchReadAssociations("deals", "companies", dealIds);
+}
+
+// Batched equivalent of getDealNotes: two association batch calls (deals→notes,
+// companies→notes) plus one chunked notes batch-read for the whole deal set,
+// instead of 4-5 requests per deal. Semantics match getDealNotes: company notes
+// merged in, v3 fallback for deals whose v4 association list is empty, deduped
+// by note ID.
+export async function getDealNotesBatch(
+  dealIds: string[],
+  companyMap?: Map<string, string[]>
+): Promise<Map<string, any[]>> {
+  const result = new Map<string, any[]>();
+  if (!dealIds.length) return result;
+
+  const dealCompanies = companyMap ?? (await getDealCompanyMap(dealIds));
+  const uniqueCompanyIds = Array.from(
+    new Set(dealIds.flatMap((id) => dealCompanies.get(id) ?? []))
+  );
+
+  const [dealNoteMap, companyNoteMap] = await Promise.all([
+    batchReadAssociations("deals", "notes", dealIds),
+    batchReadAssociations("companies", "notes", uniqueCompanyIds),
+  ]);
+
+  // v3 fallback for deals whose v4 association list came back empty (older deals)
+  const fallbackIds = dealIds.filter(
+    (id) => !(dealNoteMap.get(id) ?? []).length
+  );
+  for (let i = 0; i < fallbackIds.length; i += 10) {
+    await Promise.all(
+      fallbackIds.slice(i, i + 10).map(async (dealId) => {
+        const v3 = await hs(
+          "GET",
+          `/crm/v3/objects/deals/${dealId}/associations/notes`
+        ).catch(() => ({ results: [] }));
+        const v3Ids = (v3.results ?? [])
+          .map((r: any) => String(r.id))
+          .filter(Boolean);
+        if (v3Ids.length) dealNoteMap.set(dealId, v3Ids);
+      })
+    );
+  }
+
+  // One deduped batch-read for every note body (chunked at 100 by batchRead)
+  const allNoteIds = new Set<string>();
+  for (const noteIds of Array.from(dealNoteMap.values())) {
+    for (const id of noteIds) allNoteIds.add(id);
+  }
+  for (const noteIds of Array.from(companyNoteMap.values())) {
+    for (const id of noteIds) allNoteIds.add(id);
+  }
+  const notes = await fetchNotesByIds(Array.from(allNoteIds));
+  const noteById = new Map<string, any>(notes.map((n: any) => [String(n.id), n]));
+
+  for (const dealId of dealIds) {
+    const directIds = dealNoteMap.get(dealId) ?? [];
+    const companyNoteIds = (dealCompanies.get(dealId) ?? []).flatMap(
+      (companyId) => companyNoteMap.get(companyId) ?? []
+    );
+    const seen = new Set<string>();
+    const merged: any[] = [];
+    for (const id of [...directIds, ...companyNoteIds]) {
+      const note = noteById.get(id);
+      if (note && !seen.has(id)) {
+        seen.add(id);
+        merged.push(note);
+      }
+    }
+    result.set(dealId, merged);
+  }
+  return result;
+}
+
 async function getCompanyNotesForDeal(dealId: string): Promise<any[]> {
   const companyAssoc = await hs(
     "GET",
@@ -392,28 +503,22 @@ export async function getMsiDealsByCompanyInstanceId(instanceId: number): Promis
 }
 
 // Batch-fetch noc_instance_id (Customer Number) from the company associated with each deal.
-// Returns a Map<dealId, instanceId | null>.
+// Returns a Map<dealId, instanceId | null>. Pass a precomputed deal→companies
+// map (from getDealCompanyMap) to skip re-fetching the associations when the
+// caller already has them.
 export async function getDealCompanyNocIds(
-  dealIds: string[]
+  dealIds: string[],
+  companyMap?: Map<string, string[]>
 ): Promise<Map<string, number | null>> {
   const result = new Map<string, number | null>();
   if (!dealIds.length) return result;
 
-  // Step 1: Fetch the first company association for each deal (10 at a time)
+  // Step 1: First company association for each deal (~1 batch call)
+  const dealCompanies = companyMap ?? (await getDealCompanyMap(dealIds));
   const dealCompanyMap = new Map<string, string>(); // dealId → companyId
-  const BATCH = 10;
-  for (let i = 0; i < dealIds.length; i += BATCH) {
-    const batch = dealIds.slice(i, i + BATCH);
-    await Promise.all(
-      batch.map(async (dealId) => {
-        const assoc = await hs(
-          "GET",
-          `/crm/v4/objects/deals/${dealId}/associations/companies`
-        ).catch(() => ({ results: [] }));
-        const firstId = (assoc.results ?? [])[0]?.toObjectId;
-        if (firstId) dealCompanyMap.set(dealId, String(firstId));
-      })
-    );
+  for (const dealId of dealIds) {
+    const firstId = (dealCompanies.get(dealId) ?? [])[0];
+    if (firstId) dealCompanyMap.set(dealId, firstId);
   }
 
   // Step 2: Batch-read noc_instance_id from all unique companies

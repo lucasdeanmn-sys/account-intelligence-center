@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, searchDeals, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, searchDeals, getDealsByIds, getDealNotesBatch, getDealCompanyMap, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
 import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
@@ -238,22 +238,6 @@ function parseM1Note(
     italicYears: Array.from(italicEntries.keys()).sort((a, b) => a - b),
     nonItalicYears: Array.from(nonItalicEntries.keys()).sort((a, b) => a - b),
   };
-}
-
-async function fetchNotesBatched(deals: any[]): Promise<{ dealId: string; notes: any[] }[]> {
-  const results: { dealId: string; notes: any[] }[] = [];
-  const BATCH = 15;
-  for (let i = 0; i < deals.length; i += BATCH) {
-    const batch = deals.slice(i, i + BATCH);
-    const batchResults = await Promise.all(
-      batch.map(async (deal: any) => ({
-        dealId: deal.id,
-        notes: await getDealNotes(deal.id).catch(() => []),
-      }))
-    );
-    results.push(...batchResults);
-  }
-  return results;
 }
 
 export async function GET(req: NextRequest) {
@@ -648,10 +632,16 @@ export async function GET(req: NextRequest) {
       ? [...filteredIds, ...extPending.map((e) => e.dealId)]
       : filteredIds;
 
-    const [notesAndItems, allNocIds, freshDeals] = await Promise.all([
-      fetchNotesBatched(filtered),
-      getDealCompanyNocIds(nocLookupIds),
+    // Fetch the deal→company association map once (~1 batch call) and share it
+    // between the notes fetch and the noc_instance_id lookup — each previously
+    // re-fetched every deal→companies association individually.
+    const [dealCompanyMap, freshDeals] = await Promise.all([
+      getDealCompanyMap(nocLookupIds),
       getDealsByIds(filteredIds, ["service_terminated"]).catch(() => []),
+    ]);
+    const [notesByDealId, allNocIds] = await Promise.all([
+      getDealNotesBatch(filteredIds, dealCompanyMap),
+      getDealCompanyNocIds(nocLookupIds, dealCompanyMap),
     ]);
 
     // Split allNocIds: MSI deals → nocIdMap, extension deals → populate byNocId
@@ -678,7 +668,7 @@ export async function GET(req: NextRequest) {
     // Parse M1 notes with regex (fast, no AI required)
     const parsedMap = new Map<string, M1Parsed>();
     for (const deal of filtered) {
-      const rawNotes = notesAndItems.find((n) => n.dealId === deal.id)?.notes ?? [];
+      const rawNotes = notesByDealId.get(deal.id) ?? [];
       const notes = rawNotes.map((n: any) => ({
         id: n.id ?? "",
         body: n.properties?.hs_note_body ?? "",
@@ -811,7 +801,7 @@ export async function GET(req: NextRequest) {
       //  4. Plain "Did not renew" (no date tag):
       //     Legacy — M1 note prepends (Step 1) and pre-date-tag standalone deal notes.
       //     Still checked for backward compatibility.
-      const rawNotes = notesAndItems.find((n) => n.dealId === deal.id)?.notes ?? [];
+      const rawNotes = notesByDealId.get(deal.id) ?? [];
       const cancelled =
         svcTerminated === CANCEL_SENTINEL ||
         deal.properties?.dealstage === MSI_STAGE_DID_NOT_RENEW ||
