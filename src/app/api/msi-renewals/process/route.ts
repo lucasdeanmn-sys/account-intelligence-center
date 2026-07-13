@@ -227,11 +227,29 @@ export async function POST(req: NextRequest) {
     }
 
     // 6. Set service_terminated on the current (expiring) deal.
-    //    NOC360 rows have a synthetic currentDealId — nothing to terminate.
+    //    NOC360 rows have a synthetic currentDealId — the expiring deal is last
+    //    year's yearly deal, found by its canonical name. Year one has no prior
+    //    deal (the original contract deal is closed out manually) — no-op.
     if (!isNoc360) {
       await updateDealProperties(currentDealId, {
         service_terminated: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
       });
+    } else if (company && renewalStartDate) {
+      const priorYear =
+        new Date(renewalStartDate + "T00:00:00.000Z").getUTCFullYear() - 1;
+      const priorName = `${company} (NOC360 Renewal - ${priorYear})`;
+      const prior = await searchDeals(
+        [{ propertyName: "dealname", operator: "EQ", value: priorName }],
+        ["dealname"],
+        1
+      ).catch(() => []);
+      if (prior.length > 0) {
+        await updateDealProperties(prior[0].id, {
+          service_terminated: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
+        }).catch((e) => {
+          console.warn("Prior-year NOC360 termination failed (non-fatal):", e.message);
+        });
+      }
     }
 
     // 7. Append to Google Sheet (best-effort — failure is non-fatal but surfaced in response)

@@ -867,18 +867,43 @@ export async function associateDealWithCompany(
   await associate("deals", dealId, "companies", companyId);
 }
 
-// Exact-name company lookup. Returns null (never creates) when no match —
+// Company lookup by name. Returns null (never creates) when no match —
 // NOC360 renewal deals use this since they have no current deal to inherit
 // an association from.
+//
+// Exact match first; CSA instance names are often abbreviations of the
+// HubSpot company name ("Meeker Coop" vs "Meeker Cooperative Light & Power
+// Association"), so fall back to a token search and accept the result only
+// if exactly ONE candidate fuzzy-matches — an ambiguous match risks
+// associating the wrong company, which is worse than no association.
 export async function findCompanyIdByName(name: string): Promise<string | null> {
-  const search = await hs("POST", "/crm/v3/objects/companies/search", {
+  const exact = await hs("POST", "/crm/v3/objects/companies/search", {
     filterGroups: [
       { filters: [{ propertyName: "name", operator: "EQ", value: name }] },
     ],
     properties: ["name"],
     limit: 1,
   }).catch(() => ({ results: [] }));
-  return search.results?.length ? String(search.results[0].id) : null;
+  if (exact.results?.length) return String(exact.results[0].id);
+
+  const tokens = name.trim().split(/\s+/).filter((t) => t.length > 1);
+  const significant = tokens.filter((t) => !GENERIC_TELECOM_TOKENS.has(t.toLowerCase()));
+  const pool = significant.length > 0 ? significant : tokens;
+  const mainToken = pool.reduce((a, b) => (a.length >= b.length ? a : b), pool[0] ?? name);
+  const res = await hs("POST", "/crm/v3/objects/companies/search", {
+    filterGroups: [
+      { filters: [{ propertyName: "name", operator: "CONTAINS_TOKEN", value: mainToken }] },
+    ],
+    properties: ["name"],
+    limit: 20,
+  }).catch(() => ({ results: [] }));
+  const norm = (s: string) => s.toLowerCase().replace(/[\s\-_.,&()'"]/g, "");
+  const target = norm(name);
+  const matches = (res.results ?? []).filter((r: any) => {
+    const cand = norm(r.properties?.name ?? "");
+    return cand.length > 0 && (cand.includes(target) || target.includes(cand));
+  });
+  return matches.length === 1 ? String(matches[0].id) : null;
 }
 
 export async function createLineItem(

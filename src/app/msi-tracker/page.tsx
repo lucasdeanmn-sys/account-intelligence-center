@@ -512,14 +512,24 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
               </button>
             </div>
           ) : entry.platform === "NOC360" ? (
-            <button
-              onClick={() => onProcess(entry)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-              style={{ backgroundColor: "#6366f120", color: "#a5b4fc", border: "1px solid #6366f140" }}
-              title="Create the yearly NOC360 renewal deal in HubSpot (no M1-note steps)"
-            >
-              Process
-            </button>
+            <>
+              <button
+                onClick={() => onCancel(entry)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                style={{ backgroundColor: "#ef444415", color: "#ef4444", border: "1px solid #ef444430" }}
+                title="Did not renew — marks last year's NOC360 deal with the cancel sentinel and notes the company"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => onProcess(entry)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                style={{ backgroundColor: "#6366f120", color: "#a5b4fc", border: "1px solid #6366f140" }}
+                title="Create the yearly NOC360 renewal deal in HubSpot (no M1-note steps) and terminate last year's"
+              >
+                Process
+              </button>
+            </>
           ) : entry.unmatchedCsa ? (
             <span
               className="text-xs px-3 py-1.5"
@@ -971,6 +981,8 @@ export default function MSITrackerPage() {
       body: JSON.stringify({
         currentDealId: entry.currentDealId,
         renewalDealId: entry.renewalDealId ?? null,
+        company: entry.company,
+        renewalStartDate: entry.renewalStartDate,
       }),
     });
     const data = await res.json();
@@ -995,6 +1007,8 @@ export default function MSITrackerPage() {
         expirationDate: entry.expirationDate,
         csaInstanceName: entry.csaInstanceName ?? null,
         currentDealId: entry.currentDealId,
+        platform: entry.platform ?? "MSI",
+        renewalStartDate: entry.renewalStartDate,
       }),
     });
     const data = await res.json();

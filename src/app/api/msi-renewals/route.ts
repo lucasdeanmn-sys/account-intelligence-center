@@ -952,16 +952,30 @@ export async function GET(req: NextRequest) {
     // usage). Detect already-created yearly deals here so a reload shows
     // Processed and re-processing reuses the deal instead of duplicating it.
     const renewalYear = new Date(renewalStartDate + "T00:00:00.000Z").getUTCFullYear();
-    const existingNoc360Deals: any[] =
+    const startDateMs = new Date(startDate + "T00:00:00.000Z").getTime();
+    const [existingNoc360Deals, priorNoc360Deals]: any[][] =
       noc360Instances.length > 0
-        ? await searchDeals(
-            [
-              { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "NOC360" },
-              { propertyName: "subscription_start_date", operator: "EQ", value: String(renewalStartMs) },
-            ],
-            ["dealname", "dealstage"]
-          ).catch(() => [])
-        : [];
+        ? await Promise.all([
+            searchDeals(
+              [
+                { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "NOC360" },
+                { propertyName: "subscription_start_date", operator: "EQ", value: String(renewalStartMs) },
+              ],
+              ["dealname", "dealstage"]
+            ).catch(() => []),
+            // Last year's yearly deals (their term started when this one's
+            // expires) — a cancel sentinel on one means this instance was
+            // marked Did Not Renew, so the row stays cancelled across
+            // browsers/reloads without relying on localStorage.
+            searchDeals(
+              [
+                { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "NOC360" },
+                { propertyName: "subscription_start_date", operator: "EQ", value: String(startDateMs) },
+              ],
+              ["dealname", "service_terminated"]
+            ).catch(() => []),
+          ])
+        : [[], []];
     for (const inst of noc360Instances) {
       if (inst.status === "Disabled") continue;
       const csaCount = inst.circuits ?? null;
@@ -977,6 +991,13 @@ export async function GET(req: NextRequest) {
         (d) => d.properties?.dealname === noc360DealName
       );
       const existingStage = existingDeal?.properties?.dealstage ?? null;
+      const priorDeal = priorNoc360Deals.find(
+        (d) =>
+          d.properties?.dealname ===
+          `${inst.instanceName} (NOC360 Renewal - ${renewalYear - 1})`
+      );
+      const noc360Cancelled =
+        priorDeal?.properties?.service_terminated === CANCEL_SENTINEL;
       entries.push({
         currentDealId: `csa-noc360:${inst.instanceName}`,
         currentDealName: "NOC360 renewal (from CSA)",
@@ -1005,7 +1026,7 @@ export async function GET(req: NextRequest) {
         csaLicenseCount: lic,
         extensionNames: [],
         processed: !!(existingDeal && existingStage && processedStageIds.has(existingStage)),
-        cancelled: false,
+        cancelled: noc360Cancelled,
         multiTenant: false,
       });
     }

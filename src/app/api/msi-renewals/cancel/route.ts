@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateNoteBody, createDealNote, createCompanyNote, getDealCompanyId, updateDealProperties, CANCEL_SENTINEL } from "@/lib/hubspot";
+import { updateNoteBody, createDealNote, createCompanyNote, getDealCompanyId, findCompanyIdByName, searchDeals, updateDealProperties, CANCEL_SENTINEL } from "@/lib/hubspot";
 import { cancelRenewalRow } from "@/lib/sheets";
 import { googleConfigured } from "@/lib/google";
 
@@ -7,12 +7,53 @@ export const maxDuration = 30;
 
 export async function POST(req: NextRequest) {
   try {
-    const { m1NoteId, m1NoteHtml, company, expirationDate, csaInstanceName, currentDealId } =
+    const { m1NoteId, m1NoteHtml, company, expirationDate, csaInstanceName, currentDealId, platform, renewalStartDate } =
       await req.json();
 
     let noteError: string | null = null;
     let sheetError: string | null = null;
     let companyId: string | null = null;
+
+    // NOC360 rows carry a synthetic currentDealId ("csa-noc360:<instance>") —
+    // there is no expiring deal to note or stamp, and they are not on the MSI
+    // sheet. Cancelling one means: mark LAST year's yearly deal with the
+    // cancel sentinel (found by canonical name; year one has none — the
+    // original contract deal is closed out manually) and leave a dated
+    // "Did not renew" note on the company, found by name.
+    const isNoc360 =
+      platform === "NOC360" || String(currentDealId ?? "").startsWith("csa-noc360:");
+    if (isNoc360) {
+      if (company && renewalStartDate) {
+        const priorYear =
+          new Date(renewalStartDate + "T00:00:00.000Z").getUTCFullYear() - 1;
+        const prior = await searchDeals(
+          [{ propertyName: "dealname", operator: "EQ", value: `${company} (NOC360 Renewal - ${priorYear})` }],
+          ["dealname"],
+          1
+        ).catch(() => []);
+        if (prior.length > 0) {
+          await updateDealProperties(prior[0].id, {
+            service_terminated: CANCEL_SENTINEL,
+          }).catch((e) => {
+            console.warn("NOC360 cancel sentinel set failed:", e.message);
+            noteError = e.message;
+          });
+        }
+      }
+      if (company && expirationDate) {
+        companyId = await findCompanyIdByName(company).catch(() => null);
+        if (companyId) {
+          await createCompanyNote(
+            companyId,
+            `<p><strong>Did not renew — ${expirationDate}</strong></p>`
+          ).catch((e) => {
+            console.warn("NOC360 cancel company note failed:", e.message);
+            if (!noteError) noteError = e.message;
+          });
+        }
+      }
+      return NextResponse.json({ success: true, noteError, sheetError, companyId: companyId ?? null });
+    }
 
     // Step 1 (best-effort display): Prepend "Did not renew" to the M1 note so
     // it is visible when a rep opens the deal in HubSpot.  This uses PATCH on
