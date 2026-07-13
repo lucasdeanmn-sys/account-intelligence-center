@@ -46,6 +46,26 @@ async function hs(method: string, path: string, body?: unknown): Promise<any> {
   return res.json();
 }
 
+// HubSpot batch/read accepts at most 100 inputs per call — larger lists get a
+// 400 (which callers were swallowing into "empty results"). Chunk and merge.
+// Error policy is left to callers: this throws on failure like hs() does.
+async function batchRead(
+  objectType: string,
+  ids: string[],
+  properties: string[]
+): Promise<any[]> {
+  if (!ids.length) return [];
+  const results: any[] = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const res = await hs("POST", `/crm/v3/objects/${objectType}/batch/read`, {
+      inputs: ids.slice(i, i + 100).map((id) => ({ id })),
+      properties,
+    });
+    results.push(...(res.results ?? []));
+  }
+  return results;
+}
+
 // ─── Read helpers ─────────────────────────────────────────────────────────────
 
 export async function searchDeals(
@@ -65,12 +85,7 @@ export async function searchDeals(
 }
 
 async function fetchNotesByIds(ids: string[]): Promise<any[]> {
-  if (!ids.length) return [];
-  const batch = await hs("POST", "/crm/v3/objects/notes/batch/read", {
-    inputs: ids.map((id) => ({ id })),
-    properties: ["hs_note_body", "hs_timestamp"],
-  }).catch(() => ({ results: [] }));
-  return batch.results ?? [];
+  return batchRead("notes", ids, ["hs_note_body", "hs_timestamp"]).catch(() => []);
 }
 
 async function getCompanyNotesForDeal(dealId: string): Promise<any[]> {
@@ -142,18 +157,13 @@ export async function getDealTasks(dealId: string): Promise<any[]> {
     `/crm/v4/objects/deals/${dealId}/associations/tasks`
   ).catch(() => ({ results: [] }));
   const ids: string[] = (assoc.results ?? []).map((r: any) => String(r.toObjectId));
-  if (!ids.length) return [];
-  const batch = await hs("POST", "/crm/v3/objects/tasks/batch/read", {
-    inputs: ids.map((id) => ({ id })),
-    properties: [
-      "hs_task_subject",
-      "hs_task_body",
-      "hs_task_status",
-      "hs_task_priority",
-      "hs_timestamp",
-    ],
-  }).catch(() => ({ results: [] }));
-  return batch.results ?? [];
+  return batchRead("tasks", ids, [
+    "hs_task_subject",
+    "hs_task_body",
+    "hs_task_status",
+    "hs_task_priority",
+    "hs_timestamp",
+  ]).catch(() => []);
 }
 
 export async function getDealContacts(dealId: string): Promise<any[]> {
@@ -162,12 +172,9 @@ export async function getDealContacts(dealId: string): Promise<any[]> {
     `/crm/v4/objects/deals/${dealId}/associations/contacts`
   ).catch(() => ({ results: [] }));
   const ids: string[] = (assoc.results ?? []).map((r: any) => String(r.toObjectId));
-  if (!ids.length) return [];
-  const batch = await hs("POST", "/crm/v3/objects/contacts/batch/read", {
-    inputs: ids.map((id) => ({ id })),
-    properties: ["firstname", "lastname", "email", "phone", "jobtitle"],
-  }).catch(() => ({ results: [] }));
-  return batch.results ?? [];
+  return batchRead("contacts", ids, [
+    "firstname", "lastname", "email", "phone", "jobtitle",
+  ]).catch(() => []);
 }
 
 // ─── Write helpers ────────────────────────────────────────────────────────────
@@ -380,13 +387,8 @@ export async function getMsiDealsByCompanyInstanceId(instanceId: number): Promis
   }));
   if (!dealIds.size) return [];
 
-  // 3. Batch-read deal properties (cap at 50 to stay well within HubSpot limits)
-  const idList = Array.from(dealIds).slice(0, 50);
-  const batchRes = await hs("POST", "/crm/v3/objects/deals/batch/read", {
-    inputs: idList.map((id) => ({ id })),
-    properties: MSI_DEAL_PROPS,
-  }).catch(() => ({ results: [] }));
-  return batchRes.results ?? [];
+  // 3. Batch-read deal properties (chunked automatically at HubSpot's 100 limit)
+  return batchRead("deals", Array.from(dealIds), MSI_DEAL_PROPS).catch(() => []);
 }
 
 // Batch-fetch noc_instance_id (Customer Number) from the company associated with each deal.
@@ -417,13 +419,12 @@ export async function getDealCompanyNocIds(
   // Step 2: Batch-read noc_instance_id from all unique companies
   const uniqueCompanyIds = Array.from(new Set(Array.from(dealCompanyMap.values())));
   if (uniqueCompanyIds.length) {
-    const batchRes = await hs("POST", "/crm/v3/objects/companies/batch/read", {
-      inputs: uniqueCompanyIds.map((id) => ({ id })),
-      properties: ["noc_instance_id"],
-    }).catch(() => ({ results: [] }));
+    const companies = await batchRead("companies", uniqueCompanyIds, [
+      "noc_instance_id",
+    ]).catch(() => []);
 
     const companyNocMap = new Map<string, number | null>();
-    for (const co of batchRes.results ?? []) {
+    for (const co of companies) {
       const raw = co.properties?.noc_instance_id;
       const n = raw ? parseInt(raw, 10) : NaN;
       companyNocMap.set(String(co.id), isNaN(n) ? null : n);
@@ -648,23 +649,15 @@ export async function getMsiDealsByStartMonth(yearMonth: string): Promise<any[]>
 /** Batch-fetch deals by ID using the direct object API (not search).
  *  Unlike search, this returns current property values immediately — no index lag. */
 export async function getDealsByIds(dealIds: string[], properties: string[]): Promise<any[]> {
-  if (!dealIds.length) return [];
-  const res = await hs("POST", "/crm/v3/objects/deals/batch/read", {
-    inputs: dealIds.map((id) => ({ id })),
-    properties,
-  });
-  return res.results ?? [];
+  return batchRead("deals", dealIds, properties);
 }
 
 export async function getDealLineItems(dealId: string): Promise<any[]> {
   const assoc = await hs("GET", `/crm/v4/objects/deals/${dealId}/associations/line_items`).catch(() => ({ results: [] }));
   const ids: string[] = (assoc.results ?? []).map((r: any) => String(r.toObjectId));
-  if (!ids.length) return [];
-  const batch = await hs("POST", "/crm/v3/objects/line_items/batch/read", {
-    inputs: ids.map((id) => ({ id })),
-    properties: ["name", "quantity", "price", "amount", "hs_product_id", "recurringbillingfrequency"],
-  }).catch(() => ({ results: [] }));
-  return batch.results ?? [];
+  return batchRead("line_items", ids, [
+    "name", "quantity", "price", "amount", "hs_product_id", "recurringbillingfrequency",
+  ]).catch(() => []);
 }
 
 export async function updateNoteBody(noteId: string, htmlBody: string) {
