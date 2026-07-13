@@ -12,8 +12,11 @@ export async function POST(req: NextRequest) {
     }
 
     // 1. Clear service_terminated on the current (expiring) deal so the tracker
-    //    no longer treats it as processed.
-    await updateDealProperties(currentDealId, { service_terminated: "" });
+    //    no longer treats it as processed. Synthetic ids ("csa-noc360:*") have
+    //    no expiring deal — only the renewal deal below needs resetting.
+    if (!String(currentDealId).startsWith("csa-")) {
+      await updateDealProperties(currentDealId, { service_terminated: "" });
+    }
 
     // 2. If a renewal deal exists, move it back to the first open pipeline stage
     //    and clear its service_terminated so it no longer satisfies the

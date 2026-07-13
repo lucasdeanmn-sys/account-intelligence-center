@@ -867,6 +867,20 @@ export async function associateDealWithCompany(
   await associate("deals", dealId, "companies", companyId);
 }
 
+// Exact-name company lookup. Returns null (never creates) when no match —
+// NOC360 renewal deals use this since they have no current deal to inherit
+// an association from.
+export async function findCompanyIdByName(name: string): Promise<string | null> {
+  const search = await hs("POST", "/crm/v3/objects/companies/search", {
+    filterGroups: [
+      { filters: [{ propertyName: "name", operator: "EQ", value: name }] },
+    ],
+    properties: ["name"],
+    limit: 1,
+  }).catch(() => ({ results: [] }));
+  return search.results?.length ? String(search.results[0].id) : null;
+}
+
 export async function createLineItem(
   dealId: string,
   name: string,

@@ -512,13 +512,14 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
               </button>
             </div>
           ) : entry.platform === "NOC360" ? (
-            <span
-              className="text-xs px-3 py-1.5"
-              style={{ color: "#64748b" }}
-              title="NOC360 renewal from CSA — reported to Joan via the section email, nothing to process here."
+            <button
+              onClick={() => onProcess(entry)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+              style={{ backgroundColor: "#6366f120", color: "#a5b4fc", border: "1px solid #6366f140" }}
+              title="Create the yearly NOC360 renewal deal in HubSpot (no M1-note steps)"
             >
-              CSA renewal
-            </span>
+              Process
+            </button>
           ) : entry.unmatchedCsa ? (
             <span
               className="text-xs px-3 py-1.5"
@@ -939,6 +940,8 @@ export default function MSITrackerPage() {
         hasExtension: entry.hasExtension,
         csaInstanceName: entry.csaInstanceName ?? null,
         sheetNote: entry.sheetNote ?? null,
+        platform: entry.platform ?? "MSI",
+        csaLicenseCount: entry.csaLicenseCount ?? null,
       }),
     });
     const data = await res.json();
@@ -1067,7 +1070,7 @@ export default function MSITrackerPage() {
     <div className="p-6 max-w-5xl mx-auto">
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-white">MSI Renewal Processing</h1>
+        <h1 className="text-2xl font-bold text-white">Renewal Processing</h1>
         <p className="text-sm mt-0.5" style={{ color: "#64748b" }}>
           Select the month and year deals are expiring to generate the renewal report
         </p>

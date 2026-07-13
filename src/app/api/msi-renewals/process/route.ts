@@ -11,6 +11,8 @@ import {
   getDealCustomFields,
   getDealCompanyId,
   associateDealWithCompany,
+  findCompanyIdByName,
+  searchDeals,
   updateDealMrr,
   associateNoteWithDeal,
   MSI_PIPELINE_ID,
@@ -43,6 +45,8 @@ export async function POST(req: NextRequest) {
       hasExtension,
       csaInstanceName,
       sheetNote,
+      platform,
+      csaLicenseCount,
     } = await req.json();
 
     if (!currentDealId || !renewalDealName || !renewalCount || !expirationDate) {
@@ -52,19 +56,40 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // NOC360 renewals come from CSA with a synthetic currentDealId
+    // ("csa-noc360:<instance>") — there is no expiring HubSpot deal to read
+    // fields from, clone line items from, or terminate, and no M1 note.
+    // Processing one means: create (or reuse) the yearly
+    // "Company (NOC360 Renewal - YYYY)" deal in Ready for Billing.
+    const isNoc360 =
+      platform === "NOC360" || String(currentDealId).startsWith("csa-noc360:");
+
     // 1. Use hardcoded pipeline/stage IDs for "Software - Renewals" /
     //    "Closed Won - Ready for Billing".  Dynamic lookup via getClosedWonStage
     //    was unreliable — "Support - Renewal" appeared before "Software - Renewals"
     //    in the HubSpot API response and was picked instead.
     const stage = { pipelineId: MSI_PIPELINE_ID, stageId: MSI_STAGE_READY };
-    const [currentCustomFields, currentCompanyId] = await Promise.all([
-      getDealCustomFields(currentDealId).catch(() => ({})),
-      getDealCompanyId(currentDealId).catch(() => null),
-    ]);
+    const [currentCustomFields, currentCompanyId] = isNoc360
+      ? [{} as Record<string, string>, null]
+      : await Promise.all([
+          getDealCustomFields(currentDealId).catch(() => ({})),
+          getDealCompanyId(currentDealId).catch(() => null),
+        ]);
 
     // 2. Create or identify the renewal deal
     let renewalDealId = existingRenewalDealId as string | null;
     let action: "created" | "updated" = "updated";
+
+    // Re-processing guard for NOC360: the row carries no renewalDealId after a
+    // reload, so look the yearly deal up by its exact name before creating one.
+    if (!renewalDealId && isNoc360) {
+      const existing = await searchDeals(
+        [{ propertyName: "dealname", operator: "EQ", value: renewalDealName }],
+        ["dealname"],
+        1
+      ).catch(() => []);
+      if (existing.length > 0) renewalDealId = existing[0].id;
+    }
 
     if (!renewalDealId) {
       const newDeal = await createMsiRenewalDeal(
@@ -79,8 +104,12 @@ export async function POST(req: NextRequest) {
       action = "created";
 
       // Associate the new deal with the same company as the current deal
-      if (currentCompanyId) {
-        await associateDealWithCompany(renewalDealId!, currentCompanyId).catch((e) => {
+      // (NOC360: no current deal — look the company up by name instead).
+      const companyId =
+        currentCompanyId ??
+        (isNoc360 && company ? await findCompanyIdByName(company).catch(() => null) : null);
+      if (companyId) {
+        await associateDealWithCompany(renewalDealId!, companyId).catch((e) => {
           console.warn("Company association failed (non-fatal):", e.message);
         });
       }
@@ -113,6 +142,14 @@ export async function POST(req: NextRequest) {
     if (existingLineItems.length > 0) {
       // Renewal deal already has line items — just update the primary quantity
       await updateLineItem(existingLineItems[0].id, renewalCount);
+    } else if (isNoc360) {
+      // NOC360: no current deal to clone from — create a single line item so
+      // the count is on the deal. Count = max(CSA license, circuits rounded),
+      // already computed as renewalCount by the tracker.
+      await createLineItem(renewalDealId!, "NOC360", renewalCount, null, null, null).catch((e) => {
+        console.warn("NOC360 line item failed (non-fatal):", e.message);
+      });
+      hadLineItems = true;
     } else {
       // New deal — clone line items from the current (expiring) deal with updated qty
       await cloneLineItemsToDeal(currentDealId, renewalDealId!, renewalCount).catch((e) => {
@@ -189,10 +226,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 6. Set service_terminated on the current (expiring) deal
-    await updateDealProperties(currentDealId, {
-      service_terminated: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
-    });
+    // 6. Set service_terminated on the current (expiring) deal.
+    //    NOC360 rows have a synthetic currentDealId — nothing to terminate.
+    if (!isNoc360) {
+      await updateDealProperties(currentDealId, {
+        service_terminated: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
+      });
+    }
 
     // 7. Append to Google Sheet (best-effort — failure is non-fatal but surfaced in response)
     let sheetWriteError: string | null = null;
@@ -206,7 +246,7 @@ export async function POST(req: NextRequest) {
       await appendRenewalRow(monthLabel, {
         company,
         instanceName: csaInstanceName ?? null,
-        currentLicense: currentYearLicense ?? null,   // current year's invoiced count, not next year's order form
+        currentLicense: (isNoc360 ? (csaLicenseCount ?? null) : (currentYearLicense ?? null)),   // NOC360: CSA license; MSI: current year's invoiced count
         csaCount: csaCount ?? null,
         csaRounded: csaRounded ?? null,
         renewalCount,

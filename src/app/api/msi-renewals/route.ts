@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, searchDeals, getDealsByIds, getDealNotes, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
 import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
@@ -945,11 +945,23 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // NOC360 renewals: CSA-only rows. No HubSpot deal matching, no processing,
-    // no needs-review — informational, reported in their own section and
-    // emailed separately. Order Form column shows the CSA license count;
-    // renewal count mirrors the MSI billing rule (max of license vs rounded
-    // actual usage).
+    // NOC360 renewals: CSA-only rows, processable like MSI ones. Processing
+    // creates a yearly "Company (NOC360 Renewal - YYYY)" deal (no M1 note, no
+    // expiring deal). Order Form column shows the CSA license count; renewal
+    // count mirrors the MSI billing rule (max of license vs rounded actual
+    // usage). Detect already-created yearly deals here so a reload shows
+    // Processed and re-processing reuses the deal instead of duplicating it.
+    const renewalYear = new Date(renewalStartDate + "T00:00:00.000Z").getUTCFullYear();
+    const existingNoc360Deals: any[] =
+      noc360Instances.length > 0
+        ? await searchDeals(
+            [
+              { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "NOC360" },
+              { propertyName: "subscription_start_date", operator: "EQ", value: String(renewalStartMs) },
+            ],
+            ["dealname", "dealstage"]
+          ).catch(() => [])
+        : [];
     for (const inst of noc360Instances) {
       if (inst.status === "Disabled") continue;
       const csaCount = inst.circuits ?? null;
@@ -960,6 +972,11 @@ export async function GET(req: NextRequest) {
         lic !== null || csaRounded !== null
           ? Math.max(lic ?? 0, csaRounded ?? 0)
           : null;
+      const noc360DealName = `${inst.instanceName} (NOC360 Renewal - ${renewalYear})`;
+      const existingDeal = existingNoc360Deals.find(
+        (d) => d.properties?.dealname === noc360DealName
+      );
+      const existingStage = existingDeal?.properties?.dealstage ?? null;
       entries.push({
         currentDealId: `csa-noc360:${inst.instanceName}`,
         currentDealName: "NOC360 renewal (from CSA)",
@@ -972,8 +989,8 @@ export async function GET(req: NextRequest) {
         csaCount,
         csaRounded,
         renewalCount,
-        renewalDealId: null,
-        renewalDealName: `${inst.instanceName} (NOC360)`,
+        renewalDealId: existingDeal?.id ?? null,
+        renewalDealName: noc360DealName,
         renewalStartDate,
         expirationDate,
         m1NoteHtml: null,
@@ -987,7 +1004,7 @@ export async function GET(req: NextRequest) {
         platform: "NOC360",
         csaLicenseCount: lic,
         extensionNames: [],
-        processed: false,
+        processed: !!(existingDeal && existingStage && processedStageIds.has(existingStage)),
         cancelled: false,
         multiTenant: false,
       });
