@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   fetchCsaForMonth,
+  fetchSnapshot,
   matchCompany,
-  callMcp,
   type CsaInstance,
 } from "@/lib/csa";
 
@@ -10,48 +10,6 @@ export const maxDuration = 60;
 
 // Re-export CsaInstance so the page can still import it from this route
 export type { CsaInstance };
-
-// ─── Snapshot fetch with instance list (for standalone POST calls) ────────────
-
-async function fetchSnapshot(): Promise<{
-  records: { instance: string; circuits: number; domain: string | null; renewalDate: string | null }[];
-  allInstances: CsaInstance[];
-}> {
-  const parsed = await callMcp("get_snapshot", {});
-  const raw: any[] = Array.isArray(parsed)
-    ? parsed
-    : (parsed?.companies ?? parsed?.data ?? parsed?.results ?? parsed?.records ?? Object.values(parsed));
-
-  if (!Array.isArray(raw)) {
-    throw new Error(`CSA snapshot not an array. Got: ${JSON.stringify(parsed).slice(0, 300)}`);
-  }
-
-  const records = raw
-    .filter((r) => typeof r.instance === "string" && r.instance.length > 0)
-    .map((r) => ({
-      instance: r.instance as string,
-      circuits: (r.circuits as number) ?? 0,
-      domain: (r.domain as string | null) ?? null,
-      renewalDate: (r.renewal_date as string | null) ?? null,
-      status: (r.status as string | null) ?? null,
-      platform: (r.platform as string | null) ?? null,
-      licenseCount: r.license_count != null && !isNaN(parseInt(String(r.license_count), 10))
-        ? parseInt(String(r.license_count), 10)
-        : null,
-    }));
-
-  const allInstances: CsaInstance[] = records.map((r) => ({
-    instanceId: null,
-    instanceName: r.instance,
-    circuits: r.circuits,
-    domain: r.domain,
-    status: r.status,
-    platform: r.platform,
-    licenseCount: r.licenseCount,
-  }));
-
-  return { records, allInstances };
-}
 
 // ─── POST /api/msi-renewals/csa ───────────────────────────────────────────────
 

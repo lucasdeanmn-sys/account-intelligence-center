@@ -214,7 +214,7 @@ async function _callMcpInner(
 
 // ─── Snapshot fetch ───────────────────────────────────────────────────────────
 
-async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: CsaInstance[] }> {
+export async function fetchSnapshot(): Promise<{ records: CsaRecord[]; allInstances: CsaInstance[] }> {
   // get_snapshot returns all companies — it's a large payload; allow up to 30s.
   // status_filter "All": the server defaults to Production only, which made
   // Staging renewals (e.g. Country Wireless, Clarksville) invisible to the
