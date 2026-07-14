@@ -66,7 +66,14 @@ interface ContextMention {
   title: string;
   date: string | null;
   excerpt: string | null;
+  callType: "prospect" | "external" | "internal";
 }
+
+const CALL_TYPE_BADGE: Record<ContextMention["callType"], { label: string; bg: string; color: string }> = {
+  prospect: { label: "They were on the call", bg: "#22c55e20", color: "#22c55e" },
+  external: { label: "Partner/customer call", bg: "#6366f120", color: "#a5b4fc" },
+  internal: { label: "Internal call", bg: "#25283680", color: "#64748b" },
+};
 
 interface TargetContext {
   company: { id: string; name: string; domain: string | null; state: string | null };
@@ -295,14 +302,20 @@ function ContextPanel({
             <div>
               <SectionTitle icon={<Phone size={12} />}>RECENT CALL MENTIONS</SectionTitle>
               <div className="space-y-1.5">
-                {ctx.fathomMentions.slice(0, 3).map((m, i) => (
-                  <div key={i} className="text-xs">
-                    <p style={{ color: "#94a3b8" }}>
-                      {m.title} <span style={{ color: "#475569" }}>{m.date ?? ""}</span>
-                    </p>
-                    {m.excerpt && <p className="mt-0.5 italic" style={{ color: "#64748b" }}>{m.excerpt}</p>}
-                  </div>
-                ))}
+                {ctx.fathomMentions.slice(0, 3).map((m, i) => {
+                  const badge = CALL_TYPE_BADGE[m.callType] ?? CALL_TYPE_BADGE.external;
+                  return (
+                    <div key={i} className="text-xs">
+                      <p className="flex items-center gap-1.5 flex-wrap" style={{ color: "#94a3b8" }}>
+                        {m.title} <span style={{ color: "#475569" }}>{m.date ?? ""}</span>
+                        <span className="px-1.5 py-0.5 rounded" style={{ backgroundColor: badge.bg, color: badge.color }}>
+                          {badge.label}
+                        </span>
+                      </p>
+                      {m.excerpt && <p className="mt-0.5 italic" style={{ color: "#64748b" }}>{m.excerpt}</p>}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

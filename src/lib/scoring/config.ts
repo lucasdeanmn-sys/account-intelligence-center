@@ -55,10 +55,24 @@ export const SCORING_CONFIG = {
     { maxDays: 30, points: 30, label: "Inbound email < 30d" },
     { maxDays: 90, points: 15, label: "Inbound email 30-90d" },
   ],
-  fathomMentionTrigger: [
-    { maxDays: 60, points: 35, label: "Mentioned on a call < 60d" },
-    { maxDays: 180, points: 15, label: "Mentioned on a call 60-180d" },
-  ],
+  // Call mentions are weighted by WHO was on the call (from calendar_invitees):
+  //   prospect — the company itself was on the invite: a meeting, not a mention
+  //   external — mentioned on a call with a partner/customer/other outside party
+  //   internal — only 7SIGMA people: mostly an echo of attention already paid
+  fathomMentionTrigger: {
+    prospect: [
+      { maxDays: 60, points: 40, label: "Met with them on a call < 60d" },
+      { maxDays: 180, points: 20, label: "Met with them on a call 60-180d" },
+    ],
+    external: [
+      { maxDays: 60, points: 30, label: "Mentioned on a partner/customer call < 60d" },
+      { maxDays: 180, points: 15, label: "Mentioned on a partner/customer call 60-180d" },
+    ],
+    internal: [
+      { maxDays: 60, points: 10, label: "Discussed internally < 60d" },
+      { maxDays: 180, points: 5, label: "Discussed internally 60-180d" },
+    ],
+  },
   dealStageChangeTrigger: { maxDays: 14, points: 20, label: "Deal stage moved < 14d" },
   newsTrigger: [
     { maxDays: 14, points: 40, label: "News hit < 14d" },

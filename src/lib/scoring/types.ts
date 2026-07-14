@@ -20,10 +20,17 @@ export interface CompanyRecord {
   isCalixShop: boolean;
   manualTriggerFlag: boolean; // set by Luke in the app / HubSpot when he spots news
   lastInboundEmailDays?: number; // days since last inbound email from domain (Gmail signal)
-  fathomMentionDays?: number; // days since company mentioned in a call (Fathom signal)
+  fathomMentionDays?: number; // days since company mentioned in a call (most recent, any type)
+  /** Most-recent mention age per call type. "prospect" = the company itself was
+   *  on the invite (that's a meeting, not a mention); "external" = mentioned on
+   *  a call with a partner/customer/other outside party; "internal" = only
+   *  7SIGMA people on the call. Scoring weights these very differently. */
+  fathomMentionsByType?: Partial<Record<FathomCallType, number>>;
   newsTrigger?: { days: number; headline?: string }; // from Google Alerts RSS parsing
   deals: DealSummary[];
 }
+
+export type FathomCallType = "prospect" | "external" | "internal";
 
 export interface DealSummary {
   dealId: string;

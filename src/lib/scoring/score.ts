@@ -78,9 +78,21 @@ export function computeTrigger(c: CompanyRecord, now = new Date()): ScoreCompone
     if (tier) parts.push({ key: "email", label: tier.label, points: tier.points });
   }
 
-  if (c.fathomMentionDays != null) {
-    const tier = C.fathomMentionTrigger.find((t) => c.fathomMentionDays! <= t.maxDays);
-    if (tier) parts.push({ key: "fathom", label: tier.label, points: tier.points });
+  // One fathom component max: score every (type, recency) combination the
+  // company earned and keep the highest-scoring one. A 10d-old external
+  // mention (30) beats a 100d-old prospect meeting (20); precedence falls out
+  // of the points, not a fixed type order.
+  if (c.fathomMentionsByType) {
+    let best: { points: number; label: string } | null = null;
+    for (const [type, days] of Object.entries(c.fathomMentionsByType)) {
+      if (days == null) continue;
+      const tiers = C.fathomMentionTrigger[type as keyof typeof C.fathomMentionTrigger];
+      const tier = tiers?.find((t) => days <= t.maxDays);
+      if (tier && (!best || tier.points > best.points)) {
+        best = { points: tier.points, label: tier.label };
+      }
+    }
+    if (best) parts.push({ key: "fathom", label: best.label, points: best.points });
   }
 
   if (c.newsTrigger) {

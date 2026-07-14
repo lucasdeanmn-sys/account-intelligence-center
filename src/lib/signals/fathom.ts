@@ -1,25 +1,31 @@
 // lib/signals/fathom.ts
 // Scans recent Fathom meetings (titles + summaries, optionally transcripts) for
-// prospect company names and sets fathomMentionDays on matches.
+// prospect company mentions, classifies each hit by WHO was on the call, and
+// records the most recent mention age per call type.
+//
+// Call types (from calendar_invitees):
+//   prospect — the company itself was on the invite: a meeting, not a mention
+//   external — mentioned on a call with a partner/customer/other outside party
+//   internal — only 7SIGMA people on the call (funnel reviews etc.)
 //
 // Strategy: pull the meeting corpus ONCE, then scan locally for every company —
 // one pass over the data instead of one API search per company.
 //
 // Env: FATHOM_API_KEY
-// NOTE: verify field names against your working fathom-mcp client — the External
-// API response shape is coded defensively here but your MCP repo is ground truth.
 
 import { SCORING_CONFIG as C } from "../scoring/config";
-import type { CompanyRecord } from "../scoring/types";
+import type { CompanyRecord, FathomCallType } from "../scoring/types";
 
-interface MeetingDoc {
+export interface MeetingDoc {
   createdAt: string;
-  text: string; // title + summary (+ transcript if enabled), lowercased
+  rawText: string; // title + summary (+ transcript if enabled), ORIGINAL case
+  inviteeDomains: string[]; // lowercased email domains on the calendar invite
+  hasExternal: boolean; // any invitee flagged is_external by Fathom
 }
 
 const FATHOM_BASE = "https://api.fathom.ai/external/v1";
 
-async function fetchMeetingCorpus(): Promise<MeetingDoc[]> {
+export async function fetchMeetingCorpus(): Promise<MeetingDoc[]> {
   const apiKey = process.env.FATHOM_API_KEY;
   if (!apiKey) return []; // signal is optional — degrade gracefully
 
@@ -36,11 +42,17 @@ async function fetchMeetingCorpus(): Promise<MeetingDoc[]> {
     params.set("include_summary", "true");
     if (cursor) params.set("cursor", cursor);
 
-    const res = await fetch(`${FATHOM_BASE}/meetings?${params}`, {
-      headers: { "X-Api-Key": apiKey },
-    });
-    if (!res.ok) {
-      console.error(`Fathom signal skipped: ${res.status} ${await res.text()}`);
+    // The External API 429s under sustained pagination — back off and retry.
+    let res: Response | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      res = await fetch(`${FATHOM_BASE}/meetings?${params}`, {
+        headers: { "X-Api-Key": apiKey },
+      }).catch(() => null);
+      if (res?.status !== 429) break;
+      await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+    }
+    if (!res || !res.ok) {
+      console.error(`Fathom signal cut short: ${res ? `${res.status}` : "network error"}`);
       return docs;
     }
     const data = await res.json();
@@ -59,9 +71,14 @@ async function fetchMeetingCorpus(): Promise<MeetingDoc[]> {
       if (C.signals.fathomIncludeTranscript && Array.isArray(m.transcript)) {
         pieces.push(m.transcript.map((t: any) => t.text ?? "").join(" "));
       }
+      const invitees: any[] = m.calendar_invitees ?? [];
       docs.push({
         createdAt: m.created_at ?? m.scheduled_start_time ?? m.recording_start_time ?? since,
-        text: pieces.join(" \n ").toLowerCase(),
+        rawText: pieces.join(" \n "),
+        inviteeDomains: invitees
+          .map((i) => (i.email_domain ?? i.email?.split("@")[1] ?? "").toLowerCase())
+          .filter(Boolean),
+        hasExternal: invitees.some((i) => i.is_external === true),
       });
     }
     cursor = data.next_cursor ?? undefined;
@@ -70,17 +87,72 @@ async function fetchMeetingCorpus(): Promise<MeetingDoc[]> {
   return docs;
 }
 
-// Company names need normalizing before matching, or "ABC Telephone Company, Inc."
-// never matches "ABC Telephone" in a summary.
+// ─── Mention matching ─────────────────────────────────────────────────────────
+
+// Generic suffixes stripped when deriving the distinctive key, or "ABC
+// Telephone Company, Inc." never matches "ABC Telephone" in a summary.
 const STOP_SUFFIXES =
   /\b(inc|llc|corp|co|company|cooperative|coop|telephone|telecom|communications|networks|broadband|fiber)\.?\b/gi;
 
-export function matchKey(name: string): string | null {
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Word-boundaried phrase, tolerant of hyphens/dashes between words so
+// "S Infra" matches "S-Infra".
+function phraseRe(s: string): RegExp {
+  return new RegExp(`\\b${escapeRe(s).replace(/ /g, "[\\s\\-–—]+")}\\b`, "gi");
+}
+
+// Build a predicate deciding whether rawText mentions the company. Accepted:
+//   1. the full cleaned name as a phrase (case-insensitive): "greenlight networks"
+//   2. a multi-word distinctive key as a phrase: "la ward"
+//   3. the single-token key — ONLY where the text capitalizes it somewhere
+//      ("Greenlight", "telMAX", "GATEWAY"). The old substring match scored
+//      Greenlight Networks off the verb "greenlight" and Gateway Fiber off
+//      lowercase "gateway"; requiring an uppercase character in the matched
+//      word keeps names and drops common nouns/verbs. (Sentence-initial
+//      capitalization is the residual risk — rare in practice.)
+export function buildMentionMatcher(name: string): ((rawText: string) => boolean) | null {
   const cleaned = name.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return null;
   const key = cleaned.replace(STOP_SUFFIXES, "").replace(/\s+/g, " ").trim();
-  // Too-short keys ("abc") produce false positives; fall back to the fuller
-  // cleaned name (suffixes kept) rather than matching on 3 characters.
-  return key.length >= 5 ? key : cleaned || null;
+
+  const checks: { re: RegExp; requireUpper: boolean }[] = [];
+  if (cleaned.includes(" ")) checks.push({ re: phraseRe(cleaned), requireUpper: false });
+  if (key && key !== cleaned && key.includes(" ")) {
+    checks.push({ re: phraseRe(key), requireUpper: false });
+  }
+  const single = !key.includes(" ") && key.length >= 3
+    ? key
+    : !cleaned.includes(" ") && cleaned.length >= 3
+      ? cleaned
+      : null;
+  if (single) {
+    checks.push({ re: new RegExp(`\\b${escapeRe(single)}\\b`, "gi"), requireUpper: true });
+  }
+  if (!checks.length) return null;
+
+  return (rawText: string) => {
+    for (const { re, requireUpper } of checks) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(rawText)) !== null) {
+        if (!requireUpper) return true;
+        if (m[0] !== m[0].toLowerCase()) return true;
+      }
+    }
+    return false;
+  };
+}
+
+export function classifyCall(
+  doc: { inviteeDomains: string[]; hasExternal: boolean },
+  companyDomain?: string | null
+): FathomCallType {
+  const domain = companyDomain?.toLowerCase().replace(/^www\./, "");
+  if (domain && doc.inviteeDomains.includes(domain)) return "prospect";
+  return doc.hasExternal ? "external" : "internal";
 }
 
 export async function applyFathomSignal(
@@ -93,18 +165,21 @@ export async function applyFathomSignal(
   let hits = 0;
 
   for (const company of Array.from(companies.values())) {
-    const key = matchKey(company.name);
-    if (!key) continue;
+    const matches = buildMentionMatcher(company.name);
+    if (!matches) continue;
 
-    let mostRecent: number | undefined;
+    const byType: Partial<Record<FathomCallType, number>> = {};
     for (const doc of corpus) {
-      if (doc.text.includes(key)) {
-        const days = Math.floor((now - new Date(doc.createdAt).getTime()) / 86_400_000);
-        if (mostRecent == null || days < mostRecent) mostRecent = days;
-      }
+      if (!matches(doc.rawText)) continue;
+      const type = classifyCall(doc, company.domain);
+      const days = Math.floor((now - new Date(doc.createdAt).getTime()) / 86_400_000);
+      if (byType[type] == null || days < byType[type]!) byType[type] = days;
     }
-    if (mostRecent != null) {
-      company.fathomMentionDays = mostRecent;
+
+    const ages = Object.values(byType).filter((d): d is number => d != null);
+    if (ages.length) {
+      company.fathomMentionsByType = byType;
+      company.fathomMentionDays = Math.min(...ages);
       hits++;
     }
   }

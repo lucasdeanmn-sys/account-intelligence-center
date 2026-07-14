@@ -7,7 +7,8 @@
 // Everything is best-effort: a failing source degrades to empty rather than
 // breaking the panel.
 
-import { matchKey } from "@/lib/signals/fathom";
+import { buildMentionMatcher, classifyCall } from "@/lib/signals/fathom";
+import type { FathomCallType } from "@/lib/scoring/types";
 import { getAccessToken, latestInboundDays } from "@/lib/signals/gmail";
 import { SCORING_CONFIG as C, HUBSPOT_PROPS as P } from "@/lib/scoring/config";
 
@@ -51,6 +52,9 @@ export interface ContextMention {
   title: string;
   date: string | null;
   excerpt: string | null;
+  /** prospect = they were on the call; external = partner/customer call;
+   *  internal = 7SIGMA-only call. */
+  callType: FathomCallType;
 }
 
 export interface TargetContext {
@@ -178,7 +182,9 @@ interface FathomDoc {
   title: string;
   date: string | null;
   summary: string;
-  haystack: string; // lowercased title + summary
+  rawText: string; // title + summary, original case (matcher needs capitalization)
+  inviteeDomains: string[];
+  hasExternal: boolean;
 }
 
 let fathomCorpus: { fetchedAt: number; complete: boolean; docs: FathomDoc[] } | null = null;
@@ -226,11 +232,16 @@ async function fetchFathomCorpus(): Promise<FathomDoc[]> {
       const title = m.title ?? m.meeting_title ?? "(untitled meeting)";
       const summary: string =
         m.default_summary?.markdown_formatted ?? m.default_summary?.text ?? "";
+      const invitees: any[] = m.calendar_invitees ?? [];
       docs.push({
         title,
         date: (m.created_at ?? m.scheduled_start_time ?? m.recording_start_time ?? "").slice(0, 10) || null,
         summary,
-        haystack: `${title} \n ${summary}`.toLowerCase(),
+        rawText: `${title} \n ${summary}`,
+        inviteeDomains: invitees
+          .map((i) => (i.email_domain ?? i.email?.split("@")[1] ?? "").toLowerCase())
+          .filter(Boolean),
+        hasExternal: invitees.some((i) => i.is_external === true),
       });
     }
     cursor = data.next_cursor ?? undefined;
@@ -241,14 +252,20 @@ async function fetchFathomCorpus(): Promise<FathomDoc[]> {
   return docs;
 }
 
-async function fetchFathomMentions(companyName: string): Promise<ContextMention[]> {
-  const key = matchKey(companyName);
-  if (!key) return [];
+async function fetchFathomMentions(
+  companyName: string,
+  companyDomain: string | null
+): Promise<ContextMention[]> {
+  const matches = buildMentionMatcher(companyName);
+  if (!matches) return [];
   const docs = await fetchFathomCorpus();
+
+  // The excerpt slice still keys off the lowercased distinctive token.
+  const key = companyName.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim().split(" ")[0];
 
   const mentions: ContextMention[] = [];
   for (const doc of docs) {
-    if (!doc.haystack.includes(key)) continue;
+    if (!matches(doc.rawText)) continue;
     // Summaries are markdown with timestamp links — clean the WHOLE summary
     // first (reduce links to their text, drop bare URLs), then find the
     // mention and slice. Slicing first can cut a link in half and leave URL
@@ -259,7 +276,7 @@ async function fetchFathomMentions(companyName: string): Promise<ContextMention[
         .replace(/https?:\/\/\S+/g, "")
         .replace(/[#*_>`]/g, "")
     );
-    const sIdx = cleanedSummary.toLowerCase().indexOf(key);
+    const sIdx = key ? cleanedSummary.toLowerCase().indexOf(key) : -1;
     const cleaned =
       sIdx >= 0
         ? cleanedSummary.slice(Math.max(0, sIdx - 150), sIdx + 220).trim()
@@ -269,6 +286,7 @@ async function fetchFathomMentions(companyName: string): Promise<ContextMention[
       title: doc.title,
       date: doc.date,
       excerpt: excerpt ? `…${excerpt}…` : null,
+      callType: classifyCall(doc, companyDomain),
     });
     if (mentions.length >= 5) break;
   }
@@ -309,7 +327,7 @@ export async function getTargetContext(
   const [deals, notes, fathomMentions, lastInboundEmailDays] = await Promise.all([
     fetchDeals(companyId),
     fetchNotes(companyId),
-    includeSignals ? fetchFathomMentions(name) : Promise.resolve([]),
+    includeSignals ? fetchFathomMentions(name, domain) : Promise.resolve([]),
     includeSignals ? fetchLastInbound(domain) : Promise.resolve(null),
   ]);
 
@@ -332,8 +350,14 @@ export function buildHistoryLines(ctx: TargetContext): string[] {
     const when = d.closeDate ?? d.lastActivity ?? "";
     lines.push(`${when} ${status}: "${d.name}"${amount}`.trim());
   }
+  const CALL_TYPE_LABEL: Record<string, string> = {
+    prospect: "they were on the call",
+    external: "partner/customer call",
+    internal: "internal call",
+  };
   for (const m of ctx.fathomMentions.slice(0, 3)) {
-    lines.push(`Mentioned on call "${m.title}"${m.date ? ` (${m.date})` : ""}`);
+    const type = CALL_TYPE_LABEL[m.callType] ?? m.callType;
+    lines.push(`Mentioned on "${m.title}"${m.date ? ` (${m.date})` : ""} — ${type}`);
   }
   if (ctx.lastInboundEmailDays != null) {
     lines.push(`Last inbound email: ${ctx.lastInboundEmailDays}d ago`);
