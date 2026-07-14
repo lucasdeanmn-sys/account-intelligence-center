@@ -124,7 +124,22 @@ const sum = (parts: ScoreComponent[]) => parts.reduce((a, p) => a + p.points, 0)
 export function scoreAccount(c: CompanyRecord, now = new Date()): AccountScore {
   const fitComponents = computeFit(c, now);
   const triggerComponents = computeTrigger(c, now);
-  const fitScore = clamp100(sum(fitComponents));
+  let fitScore = clamp100(sum(fitComponents));
+
+  // National-scale cap: giants stay prospects but can't out-fit the ICP.
+  // The negative component keeps the breakdown honest about the clamp.
+  if (
+    c.subscriberCount != null &&
+    c.subscriberCount >= C.nationalScale.minSubs &&
+    fitScore > C.nationalScale.fitCap
+  ) {
+    fitComponents.push({
+      key: "national-cap",
+      label: C.nationalScale.label,
+      points: C.nationalScale.fitCap - fitScore,
+    });
+    fitScore = C.nationalScale.fitCap;
+  }
   const triggerScore = clamp100(sum(triggerComponents));
   const totalScore = Math.round(fitScore * C.FIT_WEIGHT + triggerScore * C.TRIGGER_WEIGHT);
 

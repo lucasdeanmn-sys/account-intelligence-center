@@ -318,7 +318,7 @@ export async function getTargetContext(
     const breakdown = JSON.parse(props[P.BREAKDOWN] ?? "{}");
     reasons = [...(breakdown.trigger ?? []), ...(breakdown.fit ?? [])].map(
       (c: { label: string; points: number; detail?: string }) =>
-        `${c.label} (+${c.points})${c.detail ? ` — ${c.detail}` : ""}`
+        `${c.label} (${c.points >= 0 ? "+" : ""}${c.points})${c.detail ? ` — ${c.detail}` : ""}`
     );
   } catch {
     // breakdown unavailable — reasons stay empty

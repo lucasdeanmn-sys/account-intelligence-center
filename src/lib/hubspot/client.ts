@@ -17,6 +17,11 @@ async function hs(path: string, init?: RequestInit): Promise<any> {
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
     },
+    // Opt out of the Next.js Data Cache — without this the weekly scoring run
+    // can score STALE HubSpot data (fresh property values visible via curl
+    // while the cron kept reading cached search responses). Same guard the
+    // main lib (src/lib/hubspot.ts) has always carried.
+    cache: "no-store",
   });
   if (res.status === 429) {
     // basic backoff on rate limit

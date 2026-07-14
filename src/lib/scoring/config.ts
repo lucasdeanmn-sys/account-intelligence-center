@@ -21,6 +21,16 @@ export const SCORING_CONFIG = {
   ],
   subscriberUnknownPoints: 8, // don't zero out accounts just because data is thin
 
+  // Companies far above the ICP ceiling (national MSOs/telcos that surface on
+  // calls as someone's upstream provider) stay in the universe as prospects,
+  // but fit is hard-capped — reference-state and deal-history bonuses must not
+  // stack a Charter into the top of the list.
+  nationalScale: {
+    minSubs: 1_000_000,
+    fitCap: 15,
+    label: "National scale — out of ICP, fit capped",
+  },
+
   segmentPoints: {
     RURAL_ILEC: 20,
     COOP: 20,

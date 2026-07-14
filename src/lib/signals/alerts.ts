@@ -53,7 +53,10 @@ export async function applyAlertsSignal(
     if (!company || !feedUrl) continue;
 
     try {
-      const res = await fetch(feedUrl, { headers: { "User-Agent": "aic-scoring/1.0" } });
+      const res = await fetch(feedUrl, {
+        headers: { "User-Agent": "aic-scoring/1.0" },
+        cache: "no-store", // same-URL GET every run — Next's Data Cache would serve it stale
+      });
       if (!res.ok) continue;
       const entries = parseAtom(await res.text())
         .filter((e) => now - e.publishedMs <= maxAgeMs)

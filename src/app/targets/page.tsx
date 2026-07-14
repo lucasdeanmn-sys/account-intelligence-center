@@ -114,7 +114,9 @@ function Chip({
       title={detail ? `${label} — ${detail}` : label}
     >
       {label}
-      <span style={{ color: tone === "trigger" ? "#6366f1" : "#64748b" }}>+{points}</span>
+      <span style={{ color: points < 0 ? "#ef4444" : tone === "trigger" ? "#6366f1" : "#64748b" }}>
+        {points >= 0 ? `+${points}` : points}
+      </span>
     </span>
   );
 }
