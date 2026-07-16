@@ -199,6 +199,96 @@ export async function getDealNotesBatch(
   return result;
 }
 
+// Batched fetch of engagement objects (emails, meetings, calls…) associated
+// with a set of deals. Follows both direct deal associations and company-level
+// ones — logged emails often hang off the contact/company rather than the deal
+// (e.g. threads the rep was dropped from) — merged and deduped per deal,
+// mirroring getDealNotesBatch (minus the notes-specific v3 fallback).
+async function getDealEngagementsBatch(
+  dealIds: string[],
+  objectType: string,
+  properties: string[],
+  companyMap?: Map<string, string[]>
+): Promise<Map<string, any[]>> {
+  const result = new Map<string, any[]>();
+  if (!dealIds.length) return result;
+
+  const dealCompanies = companyMap ?? (await getDealCompanyMap(dealIds));
+  const uniqueCompanyIds = Array.from(
+    new Set(dealIds.flatMap((id) => dealCompanies.get(id) ?? []))
+  );
+
+  const [dealAssocMap, companyAssocMap] = await Promise.all([
+    batchReadAssociations("deals", objectType, dealIds),
+    batchReadAssociations("companies", objectType, uniqueCompanyIds),
+  ]);
+
+  const allIds = new Set<string>();
+  for (const ids of Array.from(dealAssocMap.values())) {
+    for (const id of ids) allIds.add(id);
+  }
+  for (const ids of Array.from(companyAssocMap.values())) {
+    for (const id of ids) allIds.add(id);
+  }
+  const objects = await batchRead(objectType, Array.from(allIds), properties).catch((e) => {
+    // Surface scope/permission failures — a silent empty result here reads
+    // as "no engagements logged", which is misleading (e.g. MISSING_SCOPES
+    // when the private app lacks sales-email-read).
+    console.error(`batchRead ${objectType} failed:`, e?.message ?? e);
+    return [];
+  });
+  const byId = new Map<string, any>(objects.map((o: any) => [String(o.id), o]));
+
+  for (const dealId of dealIds) {
+    const directIds = dealAssocMap.get(dealId) ?? [];
+    const companyObjIds = (dealCompanies.get(dealId) ?? []).flatMap(
+      (companyId) => companyAssocMap.get(companyId) ?? []
+    );
+    const seen = new Set<string>();
+    const merged: any[] = [];
+    for (const id of [...directIds, ...companyObjIds]) {
+      const obj = byId.get(id);
+      if (obj && !seen.has(id)) {
+        seen.add(id);
+        merged.push(obj);
+      }
+    }
+    result.set(dealId, merged);
+  }
+  return result;
+}
+
+export async function getDealEmailsBatch(
+  dealIds: string[],
+  companyMap?: Map<string, string[]>
+): Promise<Map<string, any[]>> {
+  return getDealEngagementsBatch(
+    dealIds,
+    "emails",
+    ["hs_email_subject", "hs_email_text", "hs_email_direction", "hs_timestamp"],
+    companyMap
+  );
+}
+
+export async function getDealMeetingsBatch(
+  dealIds: string[],
+  companyMap?: Map<string, string[]>
+): Promise<Map<string, any[]>> {
+  return getDealEngagementsBatch(
+    dealIds,
+    "meetings",
+    [
+      "hs_meeting_title",
+      "hs_meeting_body",
+      "hs_meeting_start_time",
+      "hs_meeting_end_time",
+      "hs_meeting_outcome",
+      "hs_timestamp",
+    ],
+    companyMap
+  );
+}
+
 async function getCompanyNotesForDeal(dealId: string): Promise<any[]> {
   const companyAssoc = await hs(
     "GET",

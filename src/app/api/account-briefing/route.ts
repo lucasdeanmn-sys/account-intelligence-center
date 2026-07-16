@@ -5,14 +5,16 @@ import {
   getDealContacts,
   getDealNotes,
   getDealTasks,
+  getDealEmailsBatch,
+  getDealMeetingsBatch,
 } from "@/lib/hubspot";
 import type { AccountBriefing } from "@/lib/types";
 
 export const maxDuration = 120;
 
 const SYSTEM = `You are an AI sales intelligence assistant for a B2B SaaS account executive.
-HubSpot CRM data (deals, contacts, notes, tasks) has already been fetched and is provided in the user message.
-You may have access to Gmail and Google Calendar via MCP tools — use them to enrich the briefing with recent email and meeting context.
+HubSpot CRM data (deals, contacts, notes, tasks, logged emails, and meetings) has already been fetched and is provided in the user message. That is your ONLY data source — base "recentEmailSummary" strictly on the logged emails and "upcomingMeetings" on the meetings provided; never invent email or meeting context.
+Logged emails may include threads the rep was not copied on — treat those as account activity too. Meetings with a start time on or after today are upcoming; call them out with their date/time.
 
 For MSI deals (deal name contains "(MSI"), note that outreach should go through the Adtran territory manager.
 
@@ -80,9 +82,21 @@ export async function POST(req: NextRequest) {
       10
     );
 
-    // Enrich the top matching deal(s) with contacts, notes, tasks in parallel
-    const enriched = await Promise.all(
-      rawDeals.slice(0, 3).map(async (deal: any) => {
+    // Enrich the top matching deal(s) with contacts, notes, tasks, logged
+    // emails, and meetings in parallel. Emails/meetings use the batched
+    // helpers, which also pick up engagements associated only at the
+    // company level (e.g. threads the rep was dropped from).
+    const topDeals = rawDeals.slice(0, 3);
+    const dealIds = topDeals.map((d: any) => String(d.id));
+    const byTimestampDesc = (key: string) => (a: any, b: any) =>
+      new Date(b.properties?.[key] ?? 0).getTime() -
+      new Date(a.properties?.[key] ?? 0).getTime();
+
+    const [emailsByDeal, meetingsByDeal, enriched] = await Promise.all([
+      getDealEmailsBatch(dealIds).catch(() => new Map<string, any[]>()),
+      getDealMeetingsBatch(dealIds).catch(() => new Map<string, any[]>()),
+      Promise.all(
+      topDeals.map(async (deal: any) => {
         const [contacts, notes, tasks] = await Promise.all([
           getDealContacts(deal.id).catch(() => []),
           getDealNotes(deal.id).catch(() => []),
@@ -112,7 +126,33 @@ export async function POST(req: NextRequest) {
           })),
         };
       })
-    );
+      ),
+    ]);
+
+    // Attach logged emails and meetings to each enriched deal. Email bodies
+    // can be whole threads — truncate so 3 deals × 10 emails stays well
+    // inside the prompt budget.
+    for (const deal of enriched as any[]) {
+      deal.loggedEmails = (emailsByDeal.get(String(deal.id)) ?? [])
+        .sort(byTimestampDesc("hs_timestamp"))
+        .slice(0, 10)
+        .map((e: any) => ({
+          subject: e.properties?.hs_email_subject,
+          direction: e.properties?.hs_email_direction,
+          timestamp: e.properties?.hs_timestamp,
+          body: (e.properties?.hs_email_text ?? "").slice(0, 1200),
+        }));
+      deal.meetings = (meetingsByDeal.get(String(deal.id)) ?? [])
+        .sort(byTimestampDesc("hs_meeting_start_time"))
+        .slice(0, 10)
+        .map((m: any) => ({
+          title: m.properties?.hs_meeting_title,
+          startTime: m.properties?.hs_meeting_start_time,
+          endTime: m.properties?.hs_meeting_end_time,
+          outcome: m.properties?.hs_meeting_outcome,
+          body: (m.properties?.hs_meeting_body ?? "").slice(0, 500),
+        }));
+    }
 
     const today = new Date().toISOString().split("T")[0];
 
@@ -123,7 +163,7 @@ export async function POST(req: NextRequest) {
 ## HubSpot Data (pre-fetched)
 ${JSON.stringify(enriched, null, 2)}
 
-Use the deal, contact, notes, and task data above to generate the JSON briefing. Note any overdue tasks. Return the JSON.`,
+Use the deal, contact, notes, task, logged email (loggedEmails), and meeting (meetings) data above to generate the JSON briefing. Note any overdue tasks and any meetings on or after today. Return the JSON.`,
       8096
     );
 
