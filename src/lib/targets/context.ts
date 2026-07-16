@@ -202,6 +202,7 @@ interface FathomDoc {
   date: string | null;
   summary: string;
   rawText: string; // title + summary, original case (matcher needs capitalization)
+  recordingId: string | number | null;
   inviteeDomains: string[];
   hasExternal: boolean;
   invitees: { name: string | null; email: string | null; domain: string }[];
@@ -258,6 +259,7 @@ async function fetchFathomCorpus(): Promise<FathomDoc[]> {
         date: (m.created_at ?? m.scheduled_start_time ?? m.recording_start_time ?? "").slice(0, 10) || null,
         summary,
         rawText: `${title} \n ${summary}`,
+        recordingId: m.recording_id ?? null,
         inviteeDomains: invitees
           .map((i) => (i.email_domain ?? i.email?.split("@")[1] ?? "").toLowerCase())
           .filter(Boolean),
@@ -277,6 +279,92 @@ async function fetchFathomCorpus(): Promise<FathomDoc[]> {
   return docs;
 }
 
+// Shared calendars, ticket queues, and role mailboxes end up on invites but
+// are not people. Filtered unconditionally.
+const GENERIC_MAILBOX =
+  /^(info|sales|support|help|helpdesk|admin|office|billing|noc|contact|team|hello|accounts?|service|tickets?)@/i;
+const NON_PERSON_NAME =
+  /\b(meetings?|calendar|room|conference|csm|notetaker|recorder|bot|desk|queue)\b/i;
+
+function looksLikePerson(inv: { name: string | null; email: string | null }): boolean {
+  if (inv.email && GENERIC_MAILBOX.test(inv.email)) return false;
+  if (inv.name && NON_PERSON_NAME.test(inv.name)) return false;
+  return true;
+}
+
+// Did this invitee actually SPEAK on the call? Fathom's own invitee↔speaker
+// matching is nearly always empty, and transcript display names come in many
+// shapes — "Chris Dodd", "rwhite" (Roxanne White), "DJ Weber" (djweber@…) —
+// so match ourselves against every shape we've seen.
+function speakerMatchesInvitee(
+  speaker: { display: string; matchedEmail: string | null },
+  inv: { name: string | null; email: string | null }
+): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
+  if (speaker.matchedEmail && inv.email && speaker.matchedEmail.toLowerCase() === inv.email) return true;
+  const d = norm(speaker.display ?? "");
+  if (!d) return false;
+  if (inv.name) {
+    const n = norm(inv.name);
+    if (d === n) return true;
+    const parts = inv.name.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      const first = norm(parts[0]);
+      const last = norm(parts[parts.length - 1]);
+      if (first && d === first[0] + last) return true; // "rwhite"
+      if (last && d === first + last[0]) return true; // "roxannew"
+      if (d === last && last.length >= 5) return true; // bare surname
+    }
+  }
+  if (inv.email) {
+    const local = norm(inv.email.split("@")[0]);
+    if (local && d === local) return true; // "djweber"
+  }
+  return false;
+}
+
+// Speaker lists per recording, cached for the process lifetime — transcripts
+// are only fetched for the few meetings that involve the company at hand.
+const speakerCache = new Map<string, { display: string; matchedEmail: string | null }[] | null>();
+
+async function fetchSpeakers(
+  recordingId: string | number
+): Promise<{ display: string; matchedEmail: string | null }[] | null> {
+  const key = String(recordingId);
+  if (speakerCache.has(key)) return speakerCache.get(key)!;
+  const apiKey = process.env.FATHOM_API_KEY;
+  if (!apiKey) return null;
+
+  let res: Response | null = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    res = await fetch(`https://api.fathom.ai/external/v1/recordings/${key}/transcript`, {
+      headers: { "X-Api-Key": apiKey },
+    }).catch(() => null);
+    if (res?.status !== 429) break;
+    await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+  }
+  if (!res || !res.ok) {
+    speakerCache.set(key, null); // null = unavailable, callers fall back
+    return null;
+  }
+  const data = await res.json().catch(() => null);
+  const entries: any[] = Array.isArray(data) ? data : data?.transcript ?? data?.items ?? [];
+  const seen = new Map<string, { display: string; matchedEmail: string | null }>();
+  for (const e of entries) {
+    const display = e?.speaker?.display_name ?? e?.speaker?.name ?? null;
+    if (!display) continue;
+    if (!seen.has(display)) {
+      seen.set(display, {
+        display,
+        matchedEmail: e?.speaker?.matched_calendar_invitee_email?.toLowerCase() ?? null,
+      });
+    }
+  }
+  const speakers = Array.from(seen.values());
+  speakerCache.set(key, speakers);
+  return speakers;
+}
+
 async function fetchFathomMentions(
   companyName: string,
   companyDomain: string | null
@@ -285,15 +373,24 @@ async function fetchFathomMentions(
   if (!matches) return { mentions: [], participants: [] };
   const docs = await fetchFathomCorpus();
 
-  // People from the prospect's side who were actually on calls with us —
-  // matched by invitee domain, from ANY meeting on the calendar (their name
-  // in the summary isn't required to know we met them).
+  // People from the prospect's side who ENGAGED on calls with us: on the
+  // invite by domain AND matched to a transcript speaker. When a transcript
+  // can't be fetched, fall back to the invite list (minus non-persons) —
+  // showing invited-but-unverified beats showing nobody.
   const domain = companyDomain?.toLowerCase().replace(/^www\./, "") ?? null;
   const participantMap = new Map<string, ContextPerson>();
   if (domain) {
-    for (const doc of docs) {
+    const relevant = docs
+      .filter((doc) => doc.invitees.some((i) => i.domain === domain && looksLikePerson(i)))
+      .sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""))
+      .slice(0, 4); // transcripts are a per-recording fetch — bound it
+
+    for (const doc of relevant) {
+      const speakers = doc.recordingId != null ? await fetchSpeakers(doc.recordingId) : null;
       for (const inv of doc.invitees) {
-        if (inv.domain !== domain || (!inv.name && !inv.email)) continue;
+        if (inv.domain !== domain || (!inv.name && !inv.email) || !looksLikePerson(inv)) continue;
+        const engaged = speakers === null || speakers.some((s) => speakerMatchesInvitee(s, inv));
+        if (!engaged) continue;
         const key = inv.email ?? inv.name!.toLowerCase();
         const existing = participantMap.get(key);
         if (!existing || (doc.date ?? "") > (existing.lastSeen ?? "")) {

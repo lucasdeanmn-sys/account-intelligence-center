@@ -30,8 +30,13 @@ export async function getAccessToken(): Promise<string | null> {
   return (await res.json()).access_token ?? null;
 }
 
+// Query suffix excluding labeled mail (e.g. -label:tickets) per config.
+function excludeLabelsQuery(): string {
+  return (C.signals.gmailExcludeLabels ?? []).map((l) => ` -label:${l}`).join("");
+}
+
 export async function latestInboundDays(token: string, domain: string): Promise<number | null> {
-  const q = `from:${domain} newer_than:${C.signals.gmailLookbackDays}d`;
+  const q = `from:${domain} newer_than:${C.signals.gmailLookbackDays}d${excludeLabelsQuery()}`;
   const listRes = await fetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=5`,
     { headers: { Authorization: `Bearer ${token}` } }
@@ -97,7 +102,7 @@ export async function recentInboundActivity(
   lookbackDays: number,
   max = 8
 ): Promise<{ lastInboundDays: number | null; senders: InboundSender[] }> {
-  const q = `from:${domain} newer_than:${lookbackDays}d`;
+  const q = `from:${domain} newer_than:${lookbackDays}d${excludeLabelsQuery()}`;
   const listRes = await fetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${max}`,
     { headers: { Authorization: `Bearer ${token}` } }

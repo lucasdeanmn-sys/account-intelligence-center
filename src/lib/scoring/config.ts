@@ -98,6 +98,10 @@ export const SCORING_CONFIG = {
     gmailLookbackDays: 90,
     gmailConcurrency: 5, // parallel Gmail queries
     gmailMaxCompanies: 300, // safety cap: only query companies that have a domain
+    // Labels whose mail never counts as inbound signal — the support desk's
+    // ticket notifications carry prospect addresses in display names and
+    // would otherwise look like the prospect emailing us.
+    gmailExcludeLabels: ["tickets"],
     alertsMaxAgeDays: 45, // ignore RSS items older than this
   },
 
