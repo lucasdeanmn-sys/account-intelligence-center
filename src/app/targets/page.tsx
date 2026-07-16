@@ -17,6 +17,8 @@ import {
   StickyNote,
   Phone,
   Mail,
+  MapPin,
+  Users,
 } from "lucide-react";
 
 // ─── Types (mirror /api/targets response) ──────────────────────────────────────
@@ -75,14 +77,30 @@ const CALL_TYPE_BADGE: Record<ContextMention["callType"], { label: string; bg: s
   internal: { label: "Internal call", bg: "#25283680", color: "#64748b" },
 };
 
+interface ContextPerson {
+  name: string;
+  email: string | null;
+  title: string | null;
+  sources: ("hubspot" | "call" | "email")[];
+  lastSeen: string | null;
+  detail: string | null;
+}
+
 interface TargetContext {
-  company: { id: string; name: string; domain: string | null; state: string | null };
+  company: { id: string; name: string; domain: string | null; state: string | null; city: string | null };
   reasons: string[];
   deals: ContextDeal[];
   notes: ContextNote[];
   fathomMentions: ContextMention[];
+  people: ContextPerson[];
   lastInboundEmailDays: number | null;
 }
+
+const PERSON_SOURCE_BADGE: Record<"hubspot" | "call" | "email", { label: string; color: string }> = {
+  hubspot: { label: "CRM", color: "#94a3b8" },
+  call: { label: "On calls", color: "#22c55e" },
+  email: { label: "Emails us", color: "#a5b4fc" },
+};
 
 interface OutreachSuggestion {
   emailSubject: string;
@@ -254,8 +272,14 @@ function ContextPanel({
   return (
     <div className="px-4 pb-4 pt-1 border-t space-y-4" style={{ borderColor: "#252836" }}>
       {/* Signals strip */}
-      {(signalsLoading || ctx.lastInboundEmailDays != null || ctx.fathomMentions.length > 0) && (
+      {(signalsLoading || ctx.company.city || ctx.company.state || ctx.lastInboundEmailDays != null || ctx.fathomMentions.length > 0) && (
         <div className="flex flex-wrap gap-3 pt-3 text-xs" style={{ color: "#94a3b8" }}>
+          {(ctx.company.city || ctx.company.state) && (
+            <span className="flex items-center gap-1.5">
+              <MapPin size={12} style={{ color: "#a5b4fc" }} />
+              {[ctx.company.city, ctx.company.state].filter(Boolean).join(", ")}
+            </span>
+          )}
           {signalsLoading && (
             <span className="flex items-center gap-1.5" style={{ color: "#64748b" }}>
               <Loader2 size={12} className="animate-spin" />
@@ -340,6 +364,36 @@ function ContextPanel({
           )}
         </div>
       </div>
+
+      {/* People — HubSpot contacts, call participants, email senders, merged */}
+      {ctx.people.length > 0 && (
+        <div>
+          <SectionTitle icon={<Users size={12} />}>
+            PEOPLE{signalsLoading ? " (CRM so far — scanning calls & email…)" : ""}
+          </SectionTitle>
+          <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1.5">
+            {ctx.people.slice(0, 8).map((p, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs min-w-0">
+                <span className="text-white font-medium truncate" title={p.email ?? p.name}>{p.name}</span>
+                {p.title && <span className="truncate" style={{ color: "#64748b" }}>{p.title}</span>}
+                <span className="ml-auto flex items-center gap-1 shrink-0">
+                  {p.sources.map((s) => (
+                    <span
+                      key={s}
+                      className="px-1.5 py-0.5 rounded"
+                      style={{ backgroundColor: "#25283680", color: PERSON_SOURCE_BADGE[s]?.color ?? "#94a3b8" }}
+                      title={s === "call" && p.detail ? `${p.detail}${p.lastSeen ? ` (${p.lastSeen})` : ""}` : p.lastSeen ?? undefined}
+                    >
+                      {PERSON_SOURCE_BADGE[s]?.label ?? s}
+                    </span>
+                  ))}
+                  {p.lastSeen && <span style={{ color: "#475569" }}>{p.lastSeen}</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Outreach draft */}
       <div>

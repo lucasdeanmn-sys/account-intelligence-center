@@ -21,6 +21,7 @@ const SYSTEM = `You draft first-touch sales outreach for a rep at 7SIGMA, which 
 Rules:
 - Ground every claim ONLY in the provided account context. Never invent names, numbers, meetings, or history.
 - Reference the most specific hook available (a recent call mention, a closed-lost deal worth revisiting, news trigger) — that is the reason for reaching out NOW.
+- knownPeople lists real people from the CRM, calls, and email. Address the most senior/relevant one by their actual first name instead of {{firstName}} when a clear best recipient exists; name who to ask for in the call points.
 - Email: under 130 words, plain text, no bullet lists, no placeholder tokens except the {{firstName}} greeting. Confident but not salesy; one clear ask (a short call).
 - Call points: 3-5 short bullets a rep can glance at while dialing — the hook, the fit angle, likely objection + response, the ask.
 
@@ -43,6 +44,7 @@ export async function POST(
           dealHistory: context.deals.slice(0, 8),
           recentNotes: context.notes,
           recentCallMentions: context.fathomMentions,
+          knownPeople: context.people.slice(0, 8),
           lastInboundEmailDays: context.lastInboundEmailDays,
         },
         null,

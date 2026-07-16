@@ -33,23 +33,120 @@ export async function getAccessToken(): Promise<string | null> {
 export async function latestInboundDays(token: string, domain: string): Promise<number | null> {
   const q = `from:${domain} newer_than:${C.signals.gmailLookbackDays}d`;
   const listRes = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=1`,
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=5`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   if (!listRes.ok) return null;
   const list = await listRes.json();
-  const id = list.messages?.[0]?.id;
-  if (!id) return null;
+  const ids: string[] = (list.messages ?? []).map((m: any) => m.id);
 
-  const msgRes = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=minimal`,
+  // Gmail's from: operator also matches display names (our own support desk
+  // notifications carry the prospect's address as display text) — verify the
+  // actual sender address before counting a message as inbound.
+  for (const id of ids) {
+    const msgRes = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!msgRes.ok) continue;
+    const msg = await msgRes.json();
+    const from: string =
+      msg.payload?.headers?.find((h: any) => h.name?.toLowerCase() === "from")?.value ?? "";
+    const email = parseFromHeader(from)?.email;
+    const d = domain.toLowerCase();
+    if (!email || (!email.endsWith(`@${d}`) && !email.endsWith(`.${d}`))) continue;
+    if (!msg.internalDate) continue;
+    return Math.floor((Date.now() - Number(msg.internalDate)) / 86_400_000);
+  }
+  return null;
+}
+
+export interface InboundSender {
+  name: string | null;
+  email: string;
+  lastDate: string | null; // YYYY-MM-DD of their most recent email
+}
+
+// From-header shapes in the wild: `Jane Doe <jane@acme.com>`, `"Doe, Jane"
+// <jane@acme.com>`, RFC-comment style `jane@acme.com (Jane Doe)`, bare
+// `jane@acme.com`. Returns null when no address can be found.
+function parseFromHeader(from: string): { name: string | null; email: string } | null {
+  const angled = from.match(/<([^<>\s]+@[^<>\s]+)>/);
+  const email = (
+    angled?.[1] ?? from.match(/([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/)?.[1]
+  )?.toLowerCase();
+  if (!email) return null;
+  let name: string | null = null;
+  if (angled && angled.index! > 0) {
+    name = from.slice(0, angled.index).replace(/["']/g, "").trim() || null;
+  }
+  if (!name) {
+    const paren = from.match(/\(([^)]*)\)/);
+    if (paren) name = paren[1].trim() || null;
+  }
+  if (name && (name.includes("@") || name.toLowerCase() === email)) name = null;
+  return { name, email };
+}
+
+// Who has been emailing us from this domain, and when. One list call plus a
+// metadata fetch per message (no bodies). Used by the target context panel —
+// per-company on expand, never in bulk.
+export async function recentInboundActivity(
+  token: string,
+  domain: string,
+  lookbackDays: number,
+  max = 8
+): Promise<{ lastInboundDays: number | null; senders: InboundSender[] }> {
+  const q = `from:${domain} newer_than:${lookbackDays}d`;
+  const listRes = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${max}`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
-  if (!msgRes.ok) return null;
-  const msg = await msgRes.json();
-  if (!msg.internalDate) return null;
+  if (!listRes.ok) return { lastInboundDays: null, senders: [] };
+  const ids: string[] = ((await listRes.json()).messages ?? []).map((m: any) => m.id);
+  if (!ids.length) return { lastInboundDays: null, senders: [] };
 
-  return Math.floor((Date.now() - Number(msg.internalDate)) / 86_400_000);
+  const byEmail = new Map<string, InboundSender & { ms: number }>();
+  let newestMs = 0;
+  await Promise.all(
+    ids.map(async (id) => {
+      const res = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      ).catch(() => null);
+      if (!res || !res.ok) return;
+      const msg = await res.json();
+      const ms = Number(msg.internalDate ?? 0);
+      const from: string =
+        msg.payload?.headers?.find((h: any) => h.name?.toLowerCase() === "from")?.value ?? "";
+      const parsed = parseFromHeader(from);
+      if (!parsed) return;
+      const { name, email } = parsed;
+      // Gmail's from: operator also matches display names — our own support
+      // desk sends "prospect@their.com (Ticket...)" <support@7sigma.com> and
+      // would count as inbound from the prospect. Trust the address only,
+      // and only count recency from messages that pass the check.
+      if (!email.endsWith(`@${domain.toLowerCase()}`) && !email.endsWith(`.${domain.toLowerCase()}`)) return;
+      if (ms > newestMs) newestMs = ms;
+      const existing = byEmail.get(email);
+      if (!existing || ms > existing.ms) {
+        byEmail.set(email, {
+          name: name ?? existing?.name ?? null,
+          email,
+          lastDate: ms ? new Date(ms).toISOString().slice(0, 10) : null,
+          ms,
+        });
+      }
+    })
+  );
+
+  const senders = Array.from(byEmail.values())
+    .sort((a, b) => b.ms - a.ms)
+    .map(({ ms: _ms, ...s }) => s);
+  return {
+    lastInboundDays: newestMs ? Math.floor((Date.now() - newestMs) / 86_400_000) : null,
+    senders,
+  };
 }
 
 // tiny concurrency limiter — no dependency needed

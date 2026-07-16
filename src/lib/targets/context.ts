@@ -9,7 +9,8 @@
 
 import { buildMentionMatcher, classifyCall } from "@/lib/signals/fathom";
 import type { FathomCallType } from "@/lib/scoring/types";
-import { getAccessToken, latestInboundDays } from "@/lib/signals/gmail";
+import { getAccessToken, recentInboundActivity } from "@/lib/signals/gmail";
+import type { InboundSender } from "@/lib/signals/gmail";
 import { SCORING_CONFIG as C, HUBSPOT_PROPS as P } from "@/lib/scoring/config";
 
 const BASE = "https://api.hubapi.com";
@@ -57,12 +58,30 @@ export interface ContextMention {
   callType: FathomCallType;
 }
 
+export interface ContextPerson {
+  name: string;
+  email: string | null;
+  title: string | null;
+  /** Where we know them from — a person can appear in several. */
+  sources: ("hubspot" | "call" | "email")[];
+  /** Most recent touchpoint we can date (call or email). */
+  lastSeen: string | null;
+  detail: string | null; // e.g. the meeting title they attended
+}
+
 export interface TargetContext {
-  company: { id: string; name: string; domain: string | null; state: string | null };
+  company: {
+    id: string;
+    name: string;
+    domain: string | null;
+    state: string | null;
+    city: string | null;
+  };
   reasons: string[]; // score breakdown labels with points
   deals: ContextDeal[];
   notes: ContextNote[];
   fathomMentions: ContextMention[];
+  people: ContextPerson[];
   lastInboundEmailDays: number | null;
 }
 
@@ -185,6 +204,7 @@ interface FathomDoc {
   rawText: string; // title + summary, original case (matcher needs capitalization)
   inviteeDomains: string[];
   hasExternal: boolean;
+  invitees: { name: string | null; email: string | null; domain: string }[];
 }
 
 let fathomCorpus: { fetchedAt: number; complete: boolean; docs: FathomDoc[] } | null = null;
@@ -242,6 +262,11 @@ async function fetchFathomCorpus(): Promise<FathomDoc[]> {
           .map((i) => (i.email_domain ?? i.email?.split("@")[1] ?? "").toLowerCase())
           .filter(Boolean),
         hasExternal: invitees.some((i) => i.is_external === true),
+        invitees: invitees.map((i) => ({
+          name: i.name ?? null,
+          email: i.email?.toLowerCase() ?? null,
+          domain: (i.email_domain ?? i.email?.split("@")[1] ?? "").toLowerCase(),
+        })),
       });
     }
     cursor = data.next_cursor ?? undefined;
@@ -255,10 +280,35 @@ async function fetchFathomCorpus(): Promise<FathomDoc[]> {
 async function fetchFathomMentions(
   companyName: string,
   companyDomain: string | null
-): Promise<ContextMention[]> {
+): Promise<{ mentions: ContextMention[]; participants: ContextPerson[] }> {
   const matches = buildMentionMatcher(companyName);
-  if (!matches) return [];
+  if (!matches) return { mentions: [], participants: [] };
   const docs = await fetchFathomCorpus();
+
+  // People from the prospect's side who were actually on calls with us —
+  // matched by invitee domain, from ANY meeting on the calendar (their name
+  // in the summary isn't required to know we met them).
+  const domain = companyDomain?.toLowerCase().replace(/^www\./, "") ?? null;
+  const participantMap = new Map<string, ContextPerson>();
+  if (domain) {
+    for (const doc of docs) {
+      for (const inv of doc.invitees) {
+        if (inv.domain !== domain || (!inv.name && !inv.email)) continue;
+        const key = inv.email ?? inv.name!.toLowerCase();
+        const existing = participantMap.get(key);
+        if (!existing || (doc.date ?? "") > (existing.lastSeen ?? "")) {
+          participantMap.set(key, {
+            name: inv.name ?? inv.email!,
+            email: inv.email,
+            title: existing?.title ?? null,
+            sources: ["call"],
+            lastSeen: doc.date,
+            detail: doc.title,
+          });
+        }
+      }
+    }
+  }
 
   // The excerpt slice still keys off the lowercased distinctive token.
   const key = companyName.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim().split(" ")[0];
@@ -290,14 +340,101 @@ async function fetchFathomMentions(
     });
     if (mentions.length >= 5) break;
   }
-  return mentions;
+  return { mentions, participants: Array.from(participantMap.values()) };
 }
 
-async function fetchLastInbound(domain: string | null): Promise<number | null> {
-  if (!domain) return null;
+async function fetchInbound(
+  domain: string | null
+): Promise<{ lastInboundDays: number | null; senders: InboundSender[] }> {
+  if (!domain) return { lastInboundDays: null, senders: [] };
   const token = await getAccessToken().catch(() => null);
-  if (!token) return null;
-  return latestInboundDays(token, domain).catch(() => null);
+  if (!token) return { lastInboundDays: null, senders: [] };
+  return recentInboundActivity(token, domain, C.signals.gmailLookbackDays).catch(() => ({
+    lastInboundDays: null,
+    senders: [],
+  }));
+}
+
+// HubSpot contacts associated with the company — names, titles, emails.
+async function fetchContacts(companyId: string): Promise<ContextPerson[]> {
+  const assoc = await hs(
+    `/crm/v4/objects/companies/${companyId}/associations/contacts`
+  ).catch(() => ({ results: [] }));
+  const ids: string[] = (assoc.results ?? [])
+    .map((r: any) => String(r.toObjectId))
+    .slice(0, 20);
+  if (!ids.length) return [];
+
+  const batch = await hs(`/crm/v3/objects/contacts/batch/read`, {
+    method: "POST",
+    body: JSON.stringify({
+      inputs: ids.map((id) => ({ id })),
+      properties: ["firstname", "lastname", "jobtitle", "email"],
+    }),
+  }).catch(() => ({ results: [] }));
+
+  return (batch.results ?? [])
+    .map((c: any) => {
+      const p = c.properties ?? {};
+      const name = [p.firstname, p.lastname].filter(Boolean).join(" ").trim();
+      if (!name && !p.email) return null;
+      return {
+        name: name || p.email,
+        email: p.email?.toLowerCase() ?? null,
+        title: p.jobtitle ?? null,
+        sources: ["hubspot"],
+        lastSeen: null,
+        detail: null,
+      } as ContextPerson;
+    })
+    .filter(Boolean) as ContextPerson[];
+}
+
+// Merge people from HubSpot, calls, and email into one deduped list.
+// HubSpot wins on name/title; calls and email contribute recency + sources.
+function mergePeople(
+  contacts: ContextPerson[],
+  participants: ContextPerson[],
+  senders: InboundSender[]
+): ContextPerson[] {
+  const byKey = new Map<string, ContextPerson>();
+  const keyOf = (email: string | null, name: string) =>
+    email ?? `name:${name.toLowerCase()}`;
+
+  for (const p of contacts) byKey.set(keyOf(p.email, p.name), { ...p });
+
+  const fold = (p: ContextPerson) => {
+    const key = keyOf(p.email, p.name);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { ...p });
+      return;
+    }
+    for (const s of p.sources) if (!existing.sources.includes(s)) existing.sources.push(s);
+    if ((p.lastSeen ?? "") > (existing.lastSeen ?? "")) {
+      existing.lastSeen = p.lastSeen;
+      existing.detail = p.detail ?? existing.detail;
+    }
+    existing.title = existing.title ?? p.title;
+  };
+  for (const p of participants) fold(p);
+  for (const s of senders) {
+    fold({
+      name: s.name ?? s.email,
+      email: s.email,
+      title: null,
+      sources: ["email"],
+      lastSeen: s.lastDate,
+      detail: null,
+    });
+  }
+
+  // Most recently seen first, then HubSpot contacts with titles.
+  return Array.from(byKey.values()).sort((a, b) => {
+    const r = (b.lastSeen ?? "").localeCompare(a.lastSeen ?? "");
+    if (r !== 0) return r;
+    return (b.title ? 1 : 0) - (a.title ? 1 : 0);
+  });
 }
 
 export async function getTargetContext(
@@ -307,7 +444,7 @@ export async function getTargetContext(
   const includeSignals = opts.includeSignals ?? true;
 
   const company = await hs(
-    `/crm/v3/objects/companies/${companyId}?properties=${P.NAME},${P.DOMAIN},${P.STATE},${P.BREAKDOWN}`
+    `/crm/v3/objects/companies/${companyId}?properties=${P.NAME},${P.DOMAIN},${P.STATE},city,${P.BREAKDOWN}`
   );
   const props = company.properties ?? {};
   const name = props[P.NAME] ?? "(unnamed)";
@@ -324,20 +461,32 @@ export async function getTargetContext(
     // breakdown unavailable — reasons stay empty
   }
 
-  const [deals, notes, fathomMentions, lastInboundEmailDays] = await Promise.all([
+  const [deals, notes, contacts, fathom, inbound] = await Promise.all([
     fetchDeals(companyId),
     fetchNotes(companyId),
-    includeSignals ? fetchFathomMentions(name, domain) : Promise.resolve([]),
-    includeSignals ? fetchLastInbound(domain) : Promise.resolve(null),
+    fetchContacts(companyId), // HubSpot-only, cheap — included in the fast stage
+    includeSignals
+      ? fetchFathomMentions(name, domain)
+      : Promise.resolve({ mentions: [] as ContextMention[], participants: [] as ContextPerson[] }),
+    includeSignals
+      ? fetchInbound(domain)
+      : Promise.resolve({ lastInboundDays: null, senders: [] as InboundSender[] }),
   ]);
 
   return {
-    company: { id: companyId, name, domain, state: props[P.STATE] ?? null },
+    company: {
+      id: companyId,
+      name,
+      domain,
+      state: props[P.STATE] ?? null,
+      city: props.city ?? null,
+    },
     reasons,
     deals,
     notes,
-    fathomMentions,
-    lastInboundEmailDays,
+    fathomMentions: fathom.mentions,
+    people: mergePeople(contacts, fathom.participants, inbound.senders),
+    lastInboundEmailDays: inbound.lastInboundDays,
   };
 }
 
@@ -358,6 +507,12 @@ export function buildHistoryLines(ctx: TargetContext): string[] {
   for (const m of ctx.fathomMentions.slice(0, 3)) {
     const type = CALL_TYPE_LABEL[m.callType] ?? m.callType;
     lines.push(`Mentioned on "${m.title}"${m.date ? ` (${m.date})` : ""} — ${type}`);
+  }
+  for (const p of ctx.people.slice(0, 3)) {
+    const bits = [p.title, p.email, p.lastSeen ? `last touch ${p.lastSeen}` : null]
+      .filter(Boolean)
+      .join(", ");
+    lines.push(`Contact: ${p.name}${bits ? ` (${bits})` : ""}`);
   }
   if (ctx.lastInboundEmailDays != null) {
     lines.push(`Last inbound email: ${ctx.lastInboundEmailDays}d ago`);

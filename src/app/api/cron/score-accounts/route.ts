@@ -36,13 +36,26 @@ export async function GET(request: Request) {
   const companies = await fetchProspectCompanies();
   await attachDeals(companies);
 
-  // 2. Signals — each degrades gracefully if its env vars are missing,
-  //    and one failing signal never kills the run.
+  // 2. Signals — missing env vars degrade gracefully (signal skipped), but a
+  //    FAILED Fathom corpus fetch aborts the run: call mentions carry the
+  //    biggest trigger weights, and writing scores computed without them
+  //    would wipe every call trigger in HubSpot until the next run (and
+  //    poison riser deltas). Gmail/alerts failures stay non-fatal — their
+  //    per-company errors are already handled inside each signal.
+  let fathomError: string | null = null;
   const [fathomHits, gmailHits, alertsHits] = await Promise.all([
-    applyFathomSignal(companies).catch((e) => (console.error("fathom", e), 0)),
+    applyFathomSignal(companies).catch(
+      (e) => ((fathomError = e.message ?? "Fathom signal failed"), console.error("fathom", e), 0)
+    ),
     applyGmailSignal(companies).catch((e) => (console.error("gmail", e), 0)),
     applyAlertsSignal(companies).catch((e) => (console.error("alerts", e), 0)),
   ]);
+  if (fathomError) {
+    return NextResponse.json(
+      { ok: false, error: fathomError, scoresWritten: false },
+      { status: 503 }
+    );
+  }
 
   // 3. Score
   let scores = Array.from(companies.values()).map((c) => scoreAccount(c));

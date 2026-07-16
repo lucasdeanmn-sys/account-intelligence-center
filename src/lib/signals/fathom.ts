@@ -52,8 +52,13 @@ export async function fetchMeetingCorpus(): Promise<MeetingDoc[]> {
       await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
     }
     if (!res || !res.ok) {
-      console.error(`Fathom signal cut short: ${res ? `${res.status}` : "network error"}`);
-      return docs;
+      // A missing key degrades gracefully (empty corpus, signal skipped), but
+      // a FAILED fetch must not: scoring a partial/empty corpus silently
+      // zeroes every call trigger and writes those scores to HubSpot. Throw
+      // so the cron can abort the run instead of persisting wrong data.
+      throw new Error(
+        `Fathom corpus fetch failed (${res ? `HTTP ${res.status}` : "network error"}) — rate limited? Aborting rather than scoring without call mentions.`
+      );
     }
     const data = await res.json();
 
