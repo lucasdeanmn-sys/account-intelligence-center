@@ -265,7 +265,7 @@ function AccountPageContent() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-white">Account Deep-Dive</h1>
         <p className="text-sm mt-0.5" style={{ color: "#64748b" }}>
-          AI-generated briefing from HubSpot, Gmail, Calendar + web search
+          AI-generated briefing from HubSpot (deals, notes, emails, meetings) + Google Calendar
         </p>
       </div>
 
@@ -313,7 +313,7 @@ function AccountPageContent() {
             <div>
               <p className="text-sm font-medium text-white">Generating briefing for &quot;{query}&quot;</p>
               <p className="text-xs mt-0.5" style={{ color: "#64748b" }}>
-                Pulling from HubSpot, Gmail, Calendar, and web search…
+                Pulling from HubSpot and Google Calendar…
               </p>
             </div>
           </div>

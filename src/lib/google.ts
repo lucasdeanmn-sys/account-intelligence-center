@@ -53,3 +53,60 @@ export function googleConfigured(): boolean {
     process.env.GOOGLE_OAUTH_TOKEN
   );
 }
+
+export interface CalendarEvent {
+  title: string;
+  start: string | null; // ISO datetime, or date for all-day events
+  end: string | null;
+  status: string | null;
+  attendees: string[]; // emails
+}
+
+// Events on the user's primary calendar involving any of the given domains
+// (matched against attendee emails). Catches meetings that were never logged
+// or synced into HubSpot. Scope required: calendar.readonly.
+export async function getCalendarEventsForDomains(
+  domains: string[],
+  { daysBack = 30, daysAhead = 60 } = {}
+): Promise<CalendarEvent[]> {
+  if (!googleConfigured() || !domains.length) return [];
+  const token = await getGoogleToken();
+
+  const params = new URLSearchParams({
+    timeMin: new Date(Date.now() - daysBack * 86_400_000).toISOString(),
+    timeMax: new Date(Date.now() + daysAhead * 86_400_000).toISOString(),
+    singleEvents: "true",
+    orderBy: "startTime",
+    maxResults: "250",
+  });
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Google Calendar ${res.status}: ${await res.text()}`);
+  }
+  const data = await res.json();
+
+  const wanted = domains.map((d) => d.toLowerCase());
+  return (data.items ?? [])
+    .filter((ev: any) =>
+      (ev.attendees ?? []).some((a: any) => {
+        const email = String(a.email ?? "").toLowerCase();
+        return wanted.some((d) => email.endsWith(`@${d}`) || email.endsWith(`.${d}`));
+      })
+    )
+    .map((ev: any) => ({
+      title: ev.summary ?? "(no title)",
+      start: ev.start?.dateTime ?? ev.start?.date ?? null,
+      end: ev.end?.dateTime ?? ev.end?.date ?? null,
+      status: ev.status ?? null,
+      attendees: (ev.attendees ?? [])
+        .map((a: any) => String(a.email ?? ""))
+        .filter(Boolean),
+    }));
+}

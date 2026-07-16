@@ -8,13 +8,14 @@ import {
   getDealEmailsBatch,
   getDealMeetingsBatch,
 } from "@/lib/hubspot";
+import { getCalendarEventsForDomains } from "@/lib/google";
 import type { AccountBriefing } from "@/lib/types";
 
 export const maxDuration = 120;
 
 const SYSTEM = `You are an AI sales intelligence assistant for a B2B SaaS account executive.
-HubSpot CRM data (deals, contacts, notes, tasks, logged emails, and meetings) has already been fetched and is provided in the user message. That is your ONLY data source — base "recentEmailSummary" strictly on the logged emails and "upcomingMeetings" on the meetings provided; never invent email or meeting context.
-Logged emails may include threads the rep was not copied on — treat those as account activity too. Meetings with a start time on or after today are upcoming; call them out with their date/time.
+HubSpot CRM data (deals, contacts, notes, tasks, logged emails, and meetings) plus the rep's Google Calendar events involving this account have already been fetched and are provided in the user message. That is your ONLY data source — base "recentEmailSummary" strictly on the logged emails and "upcomingMeetings" on the HubSpot meetings and Google Calendar events provided; never invent email or meeting context.
+Logged emails may include threads the rep was not copied on — treat those as account activity too. The same meeting may appear in both HubSpot and Google Calendar — mention it once. Meetings/events starting on or after today are upcoming; call them out with their date/time and attendees.
 
 For MSI deals (deal name contains "(MSI"), note that outreach should go through the Adtran territory manager.
 
@@ -154,6 +155,26 @@ export async function POST(req: NextRequest) {
         }));
     }
 
+    // Google Calendar events involving the account's domains — catches
+    // meetings that were never logged or synced into HubSpot. Domains come
+    // from the HubSpot contacts' emails (freemail excluded so a personal
+    // gmail contact doesn't match the rep's whole calendar).
+    const FREEMAIL = new Set(["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "aol.com"]);
+    const accountDomains = Array.from(
+      new Set(
+        (enriched as any[])
+          .flatMap((d) => d.contacts ?? [])
+          .map((c: any) => String(c.email ?? "").split("@")[1]?.toLowerCase())
+          .filter((dom: string | undefined): dom is string => !!dom && !FREEMAIL.has(dom))
+      )
+    );
+    const calendarEvents = await getCalendarEventsForDomains(accountDomains).catch(
+      (e) => {
+        console.error("Google Calendar fetch failed:", e?.message ?? e);
+        return [];
+      }
+    );
+
     const today = new Date().toISOString().split("T")[0];
 
     const result = await callClaude(
@@ -163,7 +184,10 @@ export async function POST(req: NextRequest) {
 ## HubSpot Data (pre-fetched)
 ${JSON.stringify(enriched, null, 2)}
 
-Use the deal, contact, notes, task, logged email (loggedEmails), and meeting (meetings) data above to generate the JSON briefing. Note any overdue tasks and any meetings on or after today. Return the JSON.`,
+## Google Calendar events involving this account (past 30 / next 60 days)
+${JSON.stringify(calendarEvents, null, 2)}
+
+Use the deal, contact, notes, task, logged email (loggedEmails), meeting (meetings), and calendar event data above to generate the JSON briefing. Note any overdue tasks and any meetings on or after today. Return the JSON.`,
       8096
     );
 
