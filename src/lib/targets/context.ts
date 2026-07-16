@@ -67,6 +67,8 @@ export interface ContextPerson {
   /** Most recent touchpoint we can date (call or email). */
   lastSeen: string | null;
   detail: string | null; // e.g. the meeting title they attended
+  /** Other addresses folded into this person by alias matching. */
+  aliases?: string[];
 }
 
 export interface TargetContext {
@@ -487,6 +489,90 @@ async function fetchContacts(companyId: string): Promise<ContextPerson[]> {
     .filter(Boolean) as ContextPerson[];
 }
 
+// ─── Alias matching ────────────────────────────────────────────────────────
+// The same human shows up as dgosseling@ (HubSpot), dalen@ (their email), and
+// "Dalen Gosseling" (call invite). Exact-email dedupe leaves them as separate
+// rows, so a second folding pass matches aliases.
+
+const normPersonName = (s: string) =>
+  s.toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+// Gmail-style normalization: case, plus-tags, dots in the local part.
+const normEmailLocal = (email: string) =>
+  email.split("@")[0].toLowerCase().replace(/\+.*$/, "").replace(/\./g, "");
+const emailDomainOf = (email: string) => email.split("@")[1]?.toLowerCase() ?? "";
+
+// Does an address local part spell this person's name in a common shape?
+// dgosseling / dalen.gosseling / dalengosseling / dalen / gosseling ↔ "Dalen Gosseling"
+function localMatchesName(local: string, name: string): boolean {
+  const parts = normPersonName(name).split(" ").filter(Boolean);
+  if (parts.length < 2) return false;
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  return (
+    local === first + last ||
+    local === last + first ||
+    local === first[0] + last ||
+    local === first + last[0] ||
+    (local === first && first.length >= 4) ||
+    (local === last && last.length >= 5)
+  );
+}
+
+function samePerson(a: ContextPerson, b: ContextPerson): boolean {
+  if (a.email && b.email) {
+    if (
+      emailDomainOf(a.email) === emailDomainOf(b.email) &&
+      normEmailLocal(a.email) === normEmailLocal(b.email)
+    ) {
+      return true;
+    }
+  }
+  // Full-name match (2+ words) — safe inside a single company's panel.
+  const na = normPersonName(a.name);
+  const nb = normPersonName(b.name);
+  if (na && na === nb && na.includes(" ")) return true;
+  // Address spells the other's name — same domain only (or the named side
+  // has no address of its own).
+  for (const [x, y] of [
+    [a, b],
+    [b, a],
+  ] as const) {
+    if (!x.email) continue;
+    if (y.email && emailDomainOf(x.email) !== emailDomainOf(y.email)) continue;
+    if (localMatchesName(normEmailLocal(x.email), y.name)) return true;
+  }
+  return false;
+}
+
+// Fold alias entries into their canonical person. Earlier entries win on
+// name/title (HubSpot contacts are inserted first). An entry matching MORE
+// than one existing person is ambiguous (jsmith@ with John and Jane Smith
+// both present) and stays its own row. Exported for the validation script.
+export function foldAliases(people: ContextPerson[]): ContextPerson[] {
+  const out: ContextPerson[] = [];
+  for (const p of people) {
+    const matches = out.filter((q) => samePerson(q, p));
+    if (matches.length !== 1) {
+      out.push({ ...p });
+      continue;
+    }
+    const target = matches[0];
+    for (const s of p.sources) if (!target.sources.includes(s)) target.sources.push(s);
+    if ((p.lastSeen ?? "") > (target.lastSeen ?? "")) {
+      target.lastSeen = p.lastSeen;
+      target.detail = p.detail ?? target.detail;
+    }
+    target.title = target.title ?? p.title;
+    if (p.email && p.email !== target.email) {
+      if (!target.email) target.email = p.email;
+      else if (!(target.aliases ?? []).includes(p.email)) {
+        target.aliases = [...(target.aliases ?? []), p.email];
+      }
+    }
+  }
+  return out;
+}
+
 // Merge people from HubSpot, calls, and email into one deduped list.
 // HubSpot wins on name/title; calls and email contribute recency + sources.
 function mergePeople(
@@ -526,8 +612,10 @@ function mergePeople(
     });
   }
 
-  // Most recently seen first, then HubSpot contacts with titles.
-  return Array.from(byKey.values()).sort((a, b) => {
+  // Alias pass: same human under different addresses becomes one row
+  // (insertion order is contacts → calls → email, so HubSpot names/titles win).
+  // Then most recently seen first, then HubSpot contacts with titles.
+  return foldAliases(Array.from(byKey.values())).sort((a, b) => {
     const r = (b.lastSeen ?? "").localeCompare(a.lastSeen ?? "");
     if (r !== 0) return r;
     return (b.title ? 1 : 0) - (a.title ? 1 : 0);

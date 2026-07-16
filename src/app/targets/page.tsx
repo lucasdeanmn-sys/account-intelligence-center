@@ -84,6 +84,7 @@ interface ContextPerson {
   sources: ("hubspot" | "call" | "email")[];
   lastSeen: string | null;
   detail: string | null;
+  aliases?: string[];
 }
 
 interface TargetContext {
@@ -374,7 +375,12 @@ function ContextPanel({
           <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1.5">
             {ctx.people.slice(0, 8).map((p, i) => (
               <div key={i} className="flex items-center gap-2 text-xs min-w-0">
-                <span className="text-white font-medium truncate" title={p.email ?? p.name}>{p.name}</span>
+                <span
+                  className="text-white font-medium truncate"
+                  title={[p.email, ...(p.aliases ?? [])].filter(Boolean).join(" · ") || p.name}
+                >
+                  {p.name}
+                </span>
                 {p.title && <span className="truncate" style={{ color: "#64748b" }}>{p.title}</span>}
                 <span className="ml-auto flex items-center gap-1 shrink-0">
                   {p.sources.map((s) => (
