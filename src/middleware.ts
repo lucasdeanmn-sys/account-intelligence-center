@@ -1,4 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, NextFetchEvent } from "next/server";
+import { logRequest } from "@/lib/requestLog";
 
 // Gate every page and API route behind the APP_PASSWORD session cookie.
 // Exemptions: the login page + login API (obviously), Vercel Cron's entry
@@ -16,15 +17,29 @@ async function expectedToken(): Promise<string | null> {
     .join("");
 }
 
-export async function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest, event: NextFetchEvent) {
   const { pathname } = req.nextUrl;
-  if (PUBLIC_PATHS.some((p) => pathname === p)) return NextResponse.next();
 
   const expected = await expectedToken();
   // Fail closed: if APP_PASSWORD is unset in this environment, nothing is
   // served — a missing env var must not silently publish the app.
   const cookie = req.cookies.get("aic_auth")?.value;
-  if (expected && cookie === expected) return NextResponse.next();
+  const authed = Boolean(expected && cookie === expected);
+  const isPublic = PUBLIC_PATHS.some((p) => pathname === p);
+
+  // Permanent request log (fire-and-forget — adds no latency, never blocks).
+  event.waitUntil(
+    logRequest({
+      method: req.method,
+      path: pathname,
+      allowed: authed || isPublic,
+      ip: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null,
+      userAgent: req.headers.get("user-agent"),
+      referer: req.headers.get("referer"),
+    })
+  );
+
+  if (isPublic || authed) return NextResponse.next();
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
