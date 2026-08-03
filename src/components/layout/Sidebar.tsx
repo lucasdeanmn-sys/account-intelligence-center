@@ -12,7 +12,7 @@ import {
 const nav = [
   { href: "/", icon: LayoutDashboard, label: "Daily Priorities" },
   { href: "/account", icon: Search, label: "Account Deep-Dive" },
-  { href: "/msi-tracker", icon: RefreshCw, label: "MSI Renewals" },
+  { href: "/msi-tracker", icon: RefreshCw, label: "Subscription Renewals" },
   { href: "/targets", icon: Target, label: "AIC Targets" },
 ];
 

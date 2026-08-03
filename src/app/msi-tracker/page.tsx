@@ -432,7 +432,8 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
                 Auto-renew
               </span>
             )}
-            {entry.orderFormLicense === null && entry.currentYearLicense === null && !entry.m1NoteId && (
+            {/* NOC360 renewals have no M1 note by design — the flag is MSI-only */}
+            {entry.orderFormLicense === null && entry.currentYearLicense === null && !entry.m1NoteId && entry.platform !== "NOC360" && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#ef444415", color: "#ef4444" }}>
                 No M1 note
               </span>
