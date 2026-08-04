@@ -1252,6 +1252,10 @@ export async function getExtensionDealsForCompany(
   }
 
   const needle = company.toLowerCase();
+  // Deal names may carry a legacy alias in a trailing parenthetical —
+  // "Relyant Communications (Wilkes Telephone & Electric Company)" — while
+  // extension deals use the base name alone. Match either form.
+  const needleBase = needle.replace(/\s*\([^)]*\)\s*$/, "").trim();
   const matched: { id: string; extensionName: string; lineItems: any[] }[] = [];
 
   for (const deal of deals) {
@@ -1264,7 +1268,8 @@ export async function getExtensionDealsForCompany(
     if (!inExtPipeline && !/extension/i.test(name)) continue;
     const idx = name.indexOf(" (MSI");
     if (idx <= 0) continue;
-    if (name.slice(0, idx).trim().toLowerCase() !== needle) continue;
+    const extCompany = name.slice(0, idx).trim().toLowerCase();
+    if (extCompany !== needle && extCompany !== needleBase) continue;
     const lineItems = await getDealLineItems(deal.id).catch(() => []);
     matched.push({ id: deal.id, extensionName: extractExtensionName(name), lineItems });
   }

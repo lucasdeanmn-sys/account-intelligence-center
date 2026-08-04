@@ -753,19 +753,34 @@ export async function GET(req: NextRequest) {
         renewalCount = Math.max(orderFormLicense ?? 0, csaRounded ?? 0, currentYearLicense ?? 0);
       }
 
-      const renewalDeal = renewalDealMap.get(company.toLowerCase()) ?? null;
+      // Never let the current deal double as its own renewal deal. This
+      // happened when a current deal's subscription_start_date was hand-edited
+      // to the NEXT term's start (Relyant, Aug 2026): the date-keyed dedupe
+      // matched the deal to itself and processing mangled it in place instead
+      // of creating Year N+1.
+      let renewalDeal = renewalDealMap.get(company.toLowerCase()) ?? null;
+      if (renewalDeal?.id === deal.id) renewalDeal = null;
       const renewalDealName = `${company} (MSI - Year ${nextMsiYear ?? "?"})`;
 
       const dealName = deal.properties?.dealname ?? "";
+      // Some deal names carry a legacy alias in a trailing parenthetical —
+      // "Relyant Communications (Wilkes Telephone & Electric Company)" — while
+      // their extension deals use the base name alone. Match on both.
+      const companyBase = company.replace(/\s*\([^)]*\)\s*$/, "").trim();
       // Extension lookup — preference order:
       // 1. noc_instance_id (most reliable — shared company object, immune to name mismatches)
       // 2. Exact lowercase company name from MSI deal
       // 3. Normalised company name (strips LLC/Inc/etc.)
-      // 4. CSA instance name (exact and normalised) — bridges "Bartlett Electric" ↔ "BEC Communication"
+      // 4. Alias-stripped base name (exact and normalised)
+      // 5. CSA instance name (exact and normalised) — bridges "Bartlett Electric" ↔ "BEC Communication"
       const extensionNames: string[] =
         (nocInstanceId != null ? extensionIndex.byNocId.get(nocInstanceId) : undefined) ??
         extensionIndex.byName.get(company.toLowerCase()) ??
         extensionIndex.byName.get(normExtCo(company)) ??
+        (companyBase !== company
+          ? (extensionIndex.byName.get(companyBase.toLowerCase()) ??
+             extensionIndex.byName.get(normExtCo(companyBase)))
+          : undefined) ??
         (csaInstanceName
           ? (extensionIndex.byName.get(csaInstanceName.toLowerCase()) ??
              extensionIndex.byName.get(normExtCo(csaInstanceName)))

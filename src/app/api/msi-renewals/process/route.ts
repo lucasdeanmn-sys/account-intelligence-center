@@ -56,6 +56,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // A renewal deal must never be the current deal itself — that combination
+    // (seen when a current deal's subscription_start_date was hand-set to the
+    // next term's start) makes processing overwrite the expiring deal in place:
+    // quantity bumped, closedate moved, and service_terminated set on the same
+    // record. Fail loudly instead.
+    if (existingRenewalDealId && String(existingRenewalDealId) === String(currentDealId)) {
+      return NextResponse.json(
+        {
+          error:
+            "Renewal deal resolves to the current deal itself — check the current deal's subscription_start_date (it may be set to the NEXT term's start). Refusing to process.",
+        },
+        { status: 409 }
+      );
+    }
+
     // NOC360 renewals come from CSA with a synthetic currentDealId
     // ("csa-noc360:<instance>") — there is no expiring HubSpot deal to read
     // fields from, clone line items from, or terminate, and no M1 note.
