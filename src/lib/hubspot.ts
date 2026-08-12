@@ -1381,9 +1381,29 @@ export async function appendAutoRenewalEntry(
 
 // Sum all line items on a deal and write the annual MRR (total / 12) to `amount`.
 // Uses the catalog price when available; falls back to the stored price property.
+// NOC360 catalog tiers (monthly per-sub pricing) — same convention as
+// MSI_PRODUCT_TIERS. Used for NOC360 yearly renewal deals, matching how the
+// original "(NOC360)" contract deals are modeled: tiered product, qty = subs,
+// monthly price, line amount = monthly value.
+const NOC360_PRODUCT_TIERS: { max: number; id: string; name: string; price: string }[] = [
+  { max: 2_500,     id: "746163125",   name: "NOC360 (0-2.5k Subs)",     price: "0.40" },
+  { max: 5_000,     id: "746163126",   name: "NOC360 (2.5k-5k Subs)",    price: "0.24" },
+  { max: 10_000,    id: "746167808",   name: "NOC360 (5k-10k Subs)",     price: "0.21" },
+  { max: 50_000,    id: "746163212",   name: "NOC360 (10k-50k Subs)",    price: "0.18" },
+  { max: 100_000,   id: "795236373",   name: "NOC360 (50k-100k Subs)",   price: "0.14" },
+  { max: 500_000,   id: "21236027557", name: "NOC360 (100k-500k Subs)",  price: "0.12" },
+  { max: 800_000,   id: "23134647602", name: "NOC360 (500k-800k Subs)",  price: "0.11" },
+  { max: 2_000_000, id: "23137496474", name: "NOC360 (800k-2M Subs)",    price: "0.10" },
+  { max: 4_000_000, id: "23134647605", name: "NOC360 (2M-4M Subs)",      price: "0.09" },
+];
+
+export function noc360ProductForCount(count: number) {
+  return NOC360_PRODUCT_TIERS.find((t) => count <= t.max) ?? NOC360_PRODUCT_TIERS[NOC360_PRODUCT_TIERS.length - 1];
+}
+
 export async function updateDealMrr(dealId: string): Promise<void> {
   const items = await getDealLineItems(dealId).catch(() => []);
-  let totalAnnual = 0;
+  let totalMrr = 0;
   for (const item of items) {
     const price = parseFloat(item.properties?.price ?? "0");
     const qty = parseInt(item.properties?.quantity ?? "1", 10);
@@ -1391,11 +1411,14 @@ export async function updateDealMrr(dealId: string): Promise<void> {
     // immediately); fall back to price × qty for manually-priced items.
     const lineAmount = parseFloat(item.properties?.amount ?? "0");
     const contribution = lineAmount > 0 ? lineAmount : price * qty;
-    if (contribution > 0) totalAnnual += contribution;
+    if (contribution <= 0) continue;
+    // Monthly-billed items (NOC360 convention) already ARE monthly value;
+    // annual items (MSI convention) contribute a twelfth.
+    const freq = (item.properties?.recurringbillingfrequency ?? "").toLowerCase();
+    totalMrr += freq === "monthly" ? contribution : contribution / 12;
   }
-  if (totalAnnual > 0) {
-    const mrr = (totalAnnual / 12).toFixed(2);
-    await updateDealProperties(dealId, { amount: mrr });
+  if (totalMrr > 0) {
+    await updateDealProperties(dealId, { amount: totalMrr.toFixed(2) });
   }
 }
 

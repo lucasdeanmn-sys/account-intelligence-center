@@ -10,6 +10,7 @@ import {
   createLineItem,
   getDealCustomFields,
   getDealCompanyId,
+  noc360ProductForCount,
   associateDealWithCompany,
   findCompanyIdByName,
   searchDeals,
@@ -158,10 +159,20 @@ export async function POST(req: NextRequest) {
       // Renewal deal already has line items — just update the primary quantity
       await updateLineItem(existingLineItems[0].id, renewalCount);
     } else if (isNoc360) {
-      // NOC360: no current deal to clone from — create a single line item so
-      // the count is on the deal. Count = max(CSA license, circuits rounded),
-      // already computed as renewalCount by the tracker.
-      await createLineItem(renewalDealId!, "NOC360", renewalCount, null, null, null).catch((e) => {
+      // NOC360: no current deal to clone from — create the tier-matched
+      // catalog product line item (monthly per-sub pricing, same modeling as
+      // the original "(NOC360)" contract deals). Count = max(CSA license,
+      // circuits rounded), already computed as renewalCount by the tracker.
+      const tier = noc360ProductForCount(renewalCount);
+      await createLineItem(
+        renewalDealId!,
+        tier.name,
+        renewalCount,
+        tier.price,
+        null,
+        tier.id,
+        "monthly"
+      ).catch((e) => {
         console.warn("NOC360 line item failed (non-fatal):", e.message);
       });
       hadLineItems = true;
