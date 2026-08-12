@@ -10,6 +10,7 @@ import {
   createLineItem,
   getDealCustomFields,
   getDealCompanyId,
+  getNoc360ContractPrice,
   noc360ProductForCount,
   associateDealWithCompany,
   findCompanyIdByName,
@@ -163,12 +164,18 @@ export async function POST(req: NextRequest) {
       // catalog product line item (monthly per-sub pricing, same modeling as
       // the original "(NOC360)" contract deals). Count = max(CSA license,
       // circuits rounded), already computed as renewalCount by the tracker.
+      // Pricing is NOT adjusted on renewal: reuse the contracted rate from
+      // the company's original "(NOC360)" deal; catalog price is the fallback.
       const tier = noc360ProductForCount(renewalCount);
+      const cid = await getDealCompanyId(renewalDealId!).catch(() => null);
+      const contracted = cid
+        ? await getNoc360ContractPrice(cid).catch(() => null)
+        : null;
       await createLineItem(
         renewalDealId!,
         tier.name,
         renewalCount,
-        tier.price,
+        contracted ?? tier.price,
         null,
         tier.id,
         "monthly"

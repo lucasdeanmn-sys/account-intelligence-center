@@ -1401,6 +1401,26 @@ export function noc360ProductForCount(count: number) {
   return NOC360_PRODUCT_TIERS.find((t) => count <= t.max) ?? NOC360_PRODUCT_TIERS[NOC360_PRODUCT_TIERS.length - 1];
 }
 
+// Contracted NOC360 per-sub rate from the company's original "(NOC360)"
+// contract deal. Business rule: pricing is NOT adjusted on renewal — the
+// yearly renewal deal keeps the contracted rate; the catalog price is only
+// a fallback when no contract deal can be found.
+export async function getNoc360ContractPrice(companyId: string): Promise<string | null> {
+  const assoc = await hs(
+    "GET",
+    `/crm/v4/objects/companies/${companyId}/associations/deals`
+  ).catch(() => ({ results: [] }));
+  const ids = (assoc.results ?? []).map((r: any) => String(r.toObjectId));
+  const deals = await batchRead("deals", ids, ["dealname"]).catch(() => []);
+  const contract = deals.find((d: any) =>
+    /\(NOC360\)\s*$/.test(d.properties?.dealname ?? "")
+  );
+  if (!contract) return null;
+  const items = await getDealLineItems(String(contract.id));
+  const price = items[0]?.properties?.price;
+  return price ? String(price) : null;
+}
+
 export async function updateDealMrr(dealId: string): Promise<void> {
   const items = await getDealLineItems(dealId).catch(() => []);
   let totalMrr = 0;
