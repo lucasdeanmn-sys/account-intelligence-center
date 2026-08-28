@@ -73,12 +73,27 @@ function companiesMatch(a: string, b: string): boolean {
       .trim();
   const na = norm(a);
   const nb = norm(b);
+  // The header row's B cell is literally "Company" — and MANY telecom names
+  // contain the word "company" ("...Telephone & Electric Company"), so the
+  // containment rule below used to match the HEADER ROW and data writes
+  // overwrote it (June/July 2026 tabs). Never containment-match the header.
+  if (na === "company" || nb === "company") return na === nb;
   if (na === nb) return true;
   // Singular/plural: "Communication" vs "Communications"
   if (na + "s" === nb || nb + "s" === na) return true;
   // Substring containment: "Fiber Connect" ↔ "Fiber Connect, LLC"
   if (na.includes(nb) || nb.includes(na)) return true;
   return false;
+}
+
+// Locate the header row ("Company" in column B). All matching and insertion
+// must operate strictly BELOW it — title rows above the table used to break
+// alphabetical insertion (strays written at row 1, above the table).
+function headerRowIndex(colAB: string[][]): number {
+  for (let i = 0; i < colAB.length; i++) {
+    if ((colAB[i]?.[1] ?? "").trim().toLowerCase() === "company") return i;
+  }
+  return -1;
 }
 
 // Updates the matching company row in the month tab (e.g. "May 2026").
@@ -102,9 +117,12 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
   // Try CSA instance name first, then fall back to HubSpot company name.
   const instanceNeedle = row.instanceName?.trim() ?? null;
   const companyNeedle = row.company.trim();
+  const headerIdx = headerRowIndex(colAB);
   let matchRow = -1; // 0-based index into colAB (index 0 = sheet row 1)
 
-  for (let i = 0; i < colAB.length; i++) {
+  // Only rows BELOW the header are candidates — never the header itself or
+  // title rows above the table.
+  for (let i = headerIdx + 1; i < colAB.length; i++) {
     const cellB = colAB[i]?.[1] ?? "";
     // Instance name wins outright
     if (instanceNeedle && companiesMatch(cellB, instanceNeedle)) {
@@ -148,16 +166,21 @@ export async function appendRenewalRow(monthLabel: string, row: RenewalSheetRow)
        .trim();
     const normDisplay = normForSort(displayName);
 
-    // Skip header / empty rows; find first data row whose name sorts after ours.
+    // Find the first data row BELOW the header whose name sorts after ours.
+    // Rows above/at the header are never insertion anchors — comparing against
+    // title text used to plant rows above the table.
     let insertAtIndex = -1; // 0-based sheet index; -1 = append after last data row
-    for (let i = 0; i < colAB.length; i++) {
+    for (let i = headerIdx + 1; i < colAB.length; i++) {
       const cellB = (colAB[i]?.[1] ?? "").trim();
-      if (!cellB || cellB.toLowerCase() === "company") continue; // header / empty
+      if (!cellB) continue; // blank row inside the range
       if (normDisplay < normForSort(cellB)) {
         insertAtIndex = i;
         break;
       }
     }
+    // No header found at all — don't guess at structure; append at the very
+    // bottom instead of inserting somewhere destructive.
+    if (headerIdx === -1) insertAtIndex = -1;
 
     // Get the numeric sheetId for this tab (needed for insertDimension)
     const meta = await sheetsGet(
@@ -225,9 +248,10 @@ export async function cancelRenewalRow(
 
   const instanceNeedle = instanceName?.trim() ?? null;
   const companyNeedle = company.trim();
+  const headerIdx = headerRowIndex(colAB);
   let matchRow = -1;
 
-  for (let i = 0; i < colAB.length; i++) {
+  for (let i = headerIdx + 1; i < colAB.length; i++) {
     const cellB = colAB[i]?.[1] ?? "";
     if (instanceNeedle && companiesMatch(cellB, instanceNeedle)) { matchRow = i; break; }
     if (matchRow === -1 && companiesMatch(cellB, companyNeedle)) matchRow = i;
