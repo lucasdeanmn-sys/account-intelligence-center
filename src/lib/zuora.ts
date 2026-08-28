@@ -217,14 +217,15 @@ export interface ExtractedAgreement {
 export async function extractAgreementFromPdf(
   pdfBuffer: Buffer
 ): Promise<ExtractedAgreement | null> {
-  // pdf-parse v2 API (class-based)
+  // pdf-parse pinned to v1.1.1: pure JS, no native canvas dependency —
+  // v2 requires @napi-rs/canvas, which doesn't exist in the Vercel Lambda.
+  // The lib-path import skips v1's debug harness (which crashes when bundled).
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { PDFParse } = require("pdf-parse");
+  const pdfParse = require("pdf-parse/lib/pdf-parse.js");
   let text = "";
   try {
-    const parser = new PDFParse({ data: new Uint8Array(pdfBuffer) });
-    const result = await parser.getText();
-    text = result?.text ?? "";
+    const parsed = await pdfParse(pdfBuffer);
+    text = parsed?.text ?? "";
   } catch {
     return null;
   }
