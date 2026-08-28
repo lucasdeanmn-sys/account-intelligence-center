@@ -14,6 +14,7 @@
     "@vercel/postgres": "^0.10.0",
     "lucide-react": "^0.460.0",
     "next": "14.2.29",
+    "pdf-parse": "^2.4.5",
     "react": "^18",
     "react-dom": "^18"
   },

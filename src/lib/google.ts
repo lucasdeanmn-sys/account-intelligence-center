@@ -5,6 +5,10 @@ let cacheExpiry = 0;
 async function refreshAccessToken(): Promise<string> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
+    // no-store: Next's Data Cache once served a STALE token response minted
+    // from a since-revoked refresh token (fetch caching applies in route
+    // handlers even to POSTs here) — never cache credential exchanges.
+    cache: "no-store",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID!,

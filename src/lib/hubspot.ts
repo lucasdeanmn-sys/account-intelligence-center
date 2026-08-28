@@ -427,7 +427,7 @@ export async function createDealNote(dealId: string, htmlBody: string): Promise<
  *  so cancelled detection works even when the algorithm picks a different deal
  *  between runs (e.g. a company with two MSI deals under different names such
  *  as "NTS Communications" and "Vexus Fiber"). */
-export async function createCompanyNote(companyId: string, htmlBody: string): Promise<void> {
+export async function createCompanyNote(companyId: string, htmlBody: string): Promise<string> {
   const note = await hs("POST", "/crm/v3/objects/notes", {
     properties: {
       hs_note_body: htmlBody,
@@ -435,6 +435,7 @@ export async function createCompanyNote(companyId: string, htmlBody: string): Pr
     },
   });
   await associate("notes", note.id, "companies", companyId);
+  return String(note.id);
 }
 
 export async function createTask(
@@ -1094,6 +1095,41 @@ export async function findCompanyIdByName(name: string): Promise<string | null> 
   return matches.length === 1 ? String(matches[0].id) : null;
 }
 
+// Looser company lookup for external systems' legal names (Zuora bills
+// "TOTAH TELEPHONE CO" where HubSpot has "Totah Communications", and
+// "LA MOTTE TELEPHONE COMPANY" where HubSpot has "LaMotte Telephone").
+// Tries the strict lookup first, then distinctive leading tokens and their
+// collapsed form ("LA MOTTE" → "LAMOTTE"), accepting a candidate only when
+// exactly one distinct company's name starts with the token.
+export async function findCompanyIdLoose(name: string): Promise<string | null> {
+  const strict = await findCompanyIdByName(name);
+  if (strict) return strict;
+
+  const norm = (s: string) => s.toLowerCase().replace(/[\s\-_.,&()'"]/g, "");
+  const words = name
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !GENERIC_TELECOM_TOKENS.has(w.toLowerCase()));
+  const tries = Array.from(
+    new Set([words[0], words.slice(0, 2).join("")].filter((t) => t && t.length > 2))
+  );
+  for (const t of tries) {
+    const res = await hs("POST", "/crm/v3/objects/companies/search", {
+      filterGroups: [
+        { filters: [{ propertyName: "name", operator: "CONTAINS_TOKEN", value: t }] },
+      ],
+      properties: ["name"],
+      limit: 5,
+    }).catch(() => ({ results: [] }));
+    const hits = (res.results ?? []).filter((r: any) =>
+      norm(r.properties?.name ?? "").startsWith(norm(t))
+    );
+    const distinct = new Set(hits.map((r: any) => String(r.id)));
+    if (distinct.size === 1) return String(hits[0].id);
+  }
+  return null;
+}
+
 export async function createLineItem(
   dealId: string,
   name: string,
@@ -1463,6 +1499,28 @@ export async function updateDealMrr(dealId: string): Promise<void> {
   if (totalMrr > 0) {
     await updateDealProperties(dealId, { amount: totalMrr.toFixed(2) });
   }
+}
+
+// The company's M1 order-form note, if any (newest matching note wins).
+export async function getCompanyM1Note(
+  companyId: string
+): Promise<{ id: string; html: string } | null> {
+  const assoc = await hs(
+    "GET",
+    `/crm/v4/objects/companies/${companyId}/associations/notes`
+  ).catch(() => ({ results: [] }));
+  const ids = Array.from(
+    new Set((assoc.results ?? []).map((r: any) => String(r.toObjectId)))
+  ) as string[];
+  const notes = await batchRead("notes", ids, ["hs_note_body", "hs_timestamp"]).catch(() => []);
+  const m1 = notes
+    .filter((n: any) => /M1\s*(Order|Term)/i.test(n.properties?.hs_note_body ?? ""))
+    .sort(
+      (a: any, b: any) =>
+        new Date(b.properties?.hs_timestamp ?? 0).getTime() -
+        new Date(a.properties?.hs_timestamp ?? 0).getTime()
+    )[0];
+  return m1 ? { id: String(m1.id), html: m1.properties.hs_note_body } : null;
 }
 
 // Associate a note with a deal (e.g. link the M1 Order Form note to the renewal deal).

@@ -7,6 +7,7 @@ async function sheetsGet(path: string): Promise<any> {
   const token = await getGoogleToken();
   const res = await fetch(`${BASE}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store", // stale sheet reads corrupt row matching
   });
   if (!res.ok) throw new Error(`Sheets GET error ${res.status}: ${await res.text()}`);
   return res.json();
@@ -21,6 +22,7 @@ async function sheetsPost(path: string, body: unknown): Promise<any> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    cache: "no-store",
   });
   if (!res.ok) throw new Error(`Sheets POST error ${res.status}: ${await res.text()}`);
   return res.json();
@@ -35,6 +37,7 @@ async function sheetsPut(path: string, body: unknown): Promise<any> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    cache: "no-store",
   });
   if (!res.ok) throw new Error(`Sheets PUT error ${res.status}: ${await res.text()}`);
   return res.json();

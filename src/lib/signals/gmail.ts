@@ -15,6 +15,7 @@ export async function getAccessToken(): Promise<string | null> {
 
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
+    cache: "no-store", // never cache credential exchanges (see lib/google.ts)
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
@@ -39,7 +40,7 @@ export async function latestInboundDays(token: string, domain: string): Promise<
   const q = `from:${domain} newer_than:${C.signals.gmailLookbackDays}d${excludeLabelsQuery()}`;
   const listRes = await fetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=5`,
-    { headers: { Authorization: `Bearer ${token}` } }
+    { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
   );
   if (!listRes.ok) return null;
   const list = await listRes.json();
@@ -51,7 +52,7 @@ export async function latestInboundDays(token: string, domain: string): Promise<
   for (const id of ids) {
     const msgRes = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From`,
-      { headers: { Authorization: `Bearer ${token}` } }
+      { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
     );
     if (!msgRes.ok) continue;
     const msg = await msgRes.json();
@@ -105,7 +106,7 @@ export async function recentInboundActivity(
   const q = `from:${domain} newer_than:${lookbackDays}d${excludeLabelsQuery()}`;
   const listRes = await fetch(
     `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${max}`,
-    { headers: { Authorization: `Bearer ${token}` } }
+    { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
   );
   if (!listRes.ok) return { lastInboundDays: null, senders: [] };
   const ids: string[] = ((await listRes.json()).messages ?? []).map((m: any) => m.id);
@@ -117,7 +118,7 @@ export async function recentInboundActivity(
     ids.map(async (id) => {
       const res = await fetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From`,
-        { headers: { Authorization: `Bearer ${token}` } }
+        { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
       ).catch(() => null);
       if (!res || !res.ok) return;
       const msg = await res.json();

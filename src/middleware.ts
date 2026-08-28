@@ -5,7 +5,12 @@ import { logRequest } from "@/lib/requestLog";
 // Exemptions: the login page + login API (obviously), Vercel Cron's entry
 // point (it authenticates itself with CRON_SECRET and cannot carry cookies),
 // and Next.js static assets.
-const PUBLIC_PATHS = ["/login", "/api/auth/login", "/api/cron/score-accounts"];
+const PUBLIC_PATHS = [
+  "/login",
+  "/api/auth/login",
+  "/api/cron/score-accounts",
+  "/api/cron/zuora-reconcile",
+];
 
 async function expectedToken(): Promise<string | null> {
   const password = process.env.APP_PASSWORD;
