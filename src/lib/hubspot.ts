@@ -1308,18 +1308,37 @@ export async function appendAutoRenewalEntry(
 
   const formatted = new Intl.NumberFormat("en-US").format(renewalCount);
 
+  // Is this year BEYOND the M1's contracted term? M1 notes state "N Year M1
+  // Order Form" and often pre-list the option year beyond the term (e.g. a
+  // "3 Year" M1 listing Years 6-9: 6-8 are contracted, 9 is auto-renew).
+  // Contracted years = first listed year .. first + N - 1; anything later is
+  // an auto-renewal and its entry carries the "(Auto-renew)" marker whether
+  // it's appended fresh or italicized in place.
+  const termM = html.match(/(\d+)\s*[- ]?\s*Year\s+M1/i);
+  const listedYears = Array.from(html.matchAll(/Year\s+(\d+)\s*[-–—−]/gi)).map((m) =>
+    parseInt(m[1], 10)
+  );
+  const firstYear = listedYears.length ? Math.min(...listedYears) : null;
+  const isBeyondTerm =
+    termM && firstYear !== null
+      ? nextMsiYear > firstYear + parseInt(termM[1], 10) - 1
+      : false;
+  const AUTO = " (Auto-renew)";
+
   // Helper: given the text after "Year N - ", rewrite it to show the billing
   // amount as the main figure. Paren-only entries like "(41,500)" become
   // "45,350 (41,500)"; entries whose main count already equals renewalCount
-  // are returned unchanged; others are also left as-is.
+  // are returned unchanged; others are also left as-is. Beyond-term entries
+  // get the "(Auto-renew)" marker if missing.
   function rewriteSuffix(suffix: string): string {
-    const s = suffix.trim();
+    let s = suffix.trim();
     const parenOnlyM = s.match(/^\((\d[\d,]*)\)/);
     if (parenOnlyM) {
       // Paren-only "(41,500)" → "45,350 (41,500)"
-      return `${formatted} (${parenOnlyM[1]})`;
+      s = `${formatted} (${parenOnlyM[1]})`;
     }
-    return s; // keep existing "X,XXX" or "X,XXX (Y,YYY)" as-is
+    if (isBeyondTerm && !/auto[- ]?renew/i.test(s)) s += AUTO;
+    return s;
   }
 
   // Already italic — check whether it's paren-only and needs rewriting.
@@ -1330,8 +1349,9 @@ export async function appendAutoRenewalEntry(
   const italicMatch = alreadyItalicRe.exec(html);
   if (italicMatch) {
     const suffix = italicMatch[3].trim();
-    if (/^\([\d,]+\)/.test(suffix)) {
-      // Paren-only italic entry — rewrite to include billing amount
+    const needsParenRewrite = /^\([\d,]+\)/.test(suffix);
+    const needsAutoMarker = isBeyondTerm && !/auto[- ]?renew/i.test(suffix);
+    if (needsParenRewrite || needsAutoMarker) {
       const newInner = `MSI Year ${nextMsiYear} - ${rewriteSuffix(suffix)}`;
       await updateNoteBody(noteId, html.replace(alreadyItalicRe,
         (_, open, _inner, _suffix, close) => `${open}${newInner}${close}`
@@ -1361,7 +1381,10 @@ export async function appendAutoRenewalEntry(
   // list), just before its closing </ul>.  Notes can have multiple lists
   // (e.g. "Order Form" + "Extensions") so we target only the first one.
   // Fall back to appending a plain <p> if no list is found.
-  const newEntry = `<em>MSI Year ${nextMsiYear} - ${formatted}</em>`;
+  // A year absent from the note is an auto-renewal unless the term parse
+  // proves it's still within the contracted years.
+  const appendSuffix = isBeyondTerm || !termM ? AUTO : "";
+  const newEntry = `<em>MSI Year ${nextMsiYear} - ${formatted}${appendSuffix}</em>`;
   const firstUlOpen = html.indexOf("<ul");
   if (firstUlOpen !== -1) {
     const firstUlClose = html.indexOf("</ul>", firstUlOpen);
