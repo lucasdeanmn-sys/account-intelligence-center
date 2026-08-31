@@ -556,7 +556,7 @@ export async function searchProducts(name: string): Promise<any[]> {
 
 const MSI_DEAL_PROPS = [
   "dealname", "dealstage", "pipeline", "amount", "closedate",
-  "subscription_start_date", "hubspot_owner_id", "service_terminated",
+  "subscription_start_date", "hubspot_owner_id", "service_terminated", "did_not_renew",
 ];
 
 /**
@@ -767,7 +767,7 @@ export async function getMsiDealsByStartDate(
   }
   return searchDeals(
     filters,
-    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
+    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated", "did_not_renew"],
     200
   );
 }
@@ -812,7 +812,7 @@ export async function searchMsiDealsByCompanyName(company: string): Promise<any[
       { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: mainToken },
       { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
     ],
-    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
+    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated", "did_not_renew"],
     20
   );
 }
@@ -837,7 +837,7 @@ export async function getMsiDealsByStartMonth(yearMonth: string): Promise<any[]>
       { propertyName: "subscription_start_date", operator: "LTE", value: lastDay },
       { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
     ],
-    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated"],
+    ["dealname", "dealstage", "pipeline", "amount", "closedate", "subscription_start_date", "hubspot_owner_id", "service_terminated", "did_not_renew"],
     200
   );
 }

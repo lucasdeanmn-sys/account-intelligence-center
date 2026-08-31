@@ -32,10 +32,16 @@ export async function POST(req: NextRequest) {
           1
         ).catch(() => []);
         if (prior.length > 0) {
+          // did_not_renew carries the cancelled flag; service_terminated gets
+          // the REAL last day of the current term (sentinel only as fallback
+          // when no expiration date was provided).
           await updateDealProperties(prior[0].id, {
-            service_terminated: CANCEL_SENTINEL,
+            did_not_renew: "true",
+            service_terminated: expirationDate
+              ? new Date(expirationDate + "T00:00:00.000Z").getTime().toString()
+              : CANCEL_SENTINEL,
           }).catch((e) => {
-            console.warn("NOC360 cancel sentinel set failed:", e.message);
+            console.warn("NOC360 cancel flag set failed:", e.message);
             noteError = e.message;
           });
         }
@@ -106,15 +112,19 @@ export async function POST(req: NextRequest) {
     }
 
     // Step 4 (most reliable — survives URL/session changes, no notes needed):
-    // Stamp service_terminated on the current deal with the cancel sentinel.
-    // The report route already fetches service_terminated for every deal in the
-    // initial batch query, so detection is free and works on every run without
-    // any extra API calls or note-fetching.
+    // Flag did_not_renew on the current deal, and put the REAL last day of the
+    // current term in service_terminated so the date field means what it says
+    // to reviewers and reports. (The old approach stamped a 2000-01-01 sentinel
+    // date, which read as garbage everywhere outside this app.) Both properties
+    // are fetched with the report's initial batch query, so detection is free.
     if (currentDealId) {
       await updateDealProperties(currentDealId, {
-        service_terminated: CANCEL_SENTINEL,
+        did_not_renew: "true",
+        service_terminated: expirationDate
+          ? new Date(expirationDate + "T00:00:00.000Z").getTime().toString()
+          : CANCEL_SENTINEL,
       }).catch((e) => {
-        console.warn("Cancel sentinel property set failed:", e.message);
+        console.warn("Cancel flag property set failed:", e.message);
         if (!noteError) noteError = e.message;
       });
     }

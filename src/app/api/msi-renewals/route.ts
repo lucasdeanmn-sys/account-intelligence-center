@@ -637,7 +637,7 @@ export async function GET(req: NextRequest) {
     // re-fetched every deal→companies association individually.
     const [dealCompanyMap, freshDeals] = await Promise.all([
       getDealCompanyMap(nocLookupIds),
-      getDealsByIds(filteredIds, ["service_terminated"]).catch(() => []),
+      getDealsByIds(filteredIds, ["service_terminated", "did_not_renew"]).catch(() => []),
     ]);
     const [notesByDealId, allNocIds] = await Promise.all([
       getDealNotesBatch(filteredIds, dealCompanyMap),
@@ -658,11 +658,13 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Build a map from deal ID → fresh service_terminated value
+    // Build maps from deal ID → fresh service_terminated / did_not_renew values
     const freshSvcTermMap = new Map<string, string>();
+    const freshDnrSet = new Set<string>();
     for (const d of freshDeals) {
       const val = d.properties?.service_terminated;
       if (val) freshSvcTermMap.set(String(d.id), val);
+      if (d.properties?.did_not_renew === "true") freshDnrSet.add(String(d.id));
     }
 
     // Parse M1 notes with regex (fast, no AI required)
@@ -797,12 +799,15 @@ export async function GET(req: NextRequest) {
 
       const multiTenant = nocInstanceId != null && multiTenantIds.has(nocInstanceId);
 
-      // Detect cancellation.  Four signals checked in decreasing reliability:
+      // Detect cancellation.  Signals checked in decreasing reliability:
       //
-      //  1. service_terminated === CANCEL_SENTINEL (most reliable):
-      //     Set directly on the deal by Step 4 of the cancel route.  Already
-      //     fetched in the initial batch query — no extra API call needed, works
-      //     across sessions and Vercel preview-URL changes.
+      //  0. did_not_renew === true (most reliable, current convention):
+      //     Dedicated flag set by the cancel route; service_terminated then
+      //     carries the REAL term-end date for reviewers and reports.
+      //
+      //  1. service_terminated === CANCEL_SENTINEL (legacy convention):
+      //     Older cancels stamped 2000-01-01 as a magic marker.  Kept for
+      //     backward compatibility with deals cancelled before the flag existed.
       //
       //  2. dealstage === MSI_STAGE_DID_NOT_RENEW:
       //     Deal was explicitly moved to the "Did Not Renew" stage in HubSpot.
@@ -817,7 +822,10 @@ export async function GET(req: NextRequest) {
       //     Legacy — M1 note prepends (Step 1) and pre-date-tag standalone deal notes.
       //     Still checked for backward compatibility.
       const rawNotes = notesByDealId.get(deal.id) ?? [];
+      const didNotRenew =
+        freshDnrSet.has(deal.id) || deal.properties?.did_not_renew === "true";
       const cancelled =
+        didNotRenew ||
         svcTerminated === CANCEL_SENTINEL ||
         deal.properties?.dealstage === MSI_STAGE_DID_NOT_RENEW ||
         rawNotes.some((n: any) => {
@@ -827,7 +835,8 @@ export async function GET(req: NextRequest) {
         });
 
       // processed: only if not cancelled, and either a billing-stage renewal deal
-      // exists OR service_terminated is a real date (not the cancel sentinel).
+      // exists OR service_terminated is a real date (not the cancel sentinel —
+      // and not a cancel-written real date, which `!cancelled` already excludes).
       const processed = !cancelled && !!(
         (renewalDeal && renewalStage && processedStageIds.has(renewalStage)) ||
         (svcTerminated && svcTerminated !== CANCEL_SENTINEL)
@@ -977,7 +986,7 @@ export async function GET(req: NextRequest) {
                 { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "NOC360" },
                 { propertyName: "subscription_start_date", operator: "EQ", value: String(startDateMs) },
               ],
-              ["dealname", "service_terminated"]
+              ["dealname", "service_terminated", "did_not_renew"]
             ).catch(() => []),
           ])
         : [[], []];
@@ -1002,6 +1011,7 @@ export async function GET(req: NextRequest) {
           `${inst.instanceName} (NOC360 Renewal - ${renewalYear - 1})`
       );
       const noc360Cancelled =
+        priorDeal?.properties?.did_not_renew === "true" ||
         priorDeal?.properties?.service_terminated === CANCEL_SENTINEL;
       entries.push({
         currentDealId: `csa-noc360:${inst.instanceName}`,
