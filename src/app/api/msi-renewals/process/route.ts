@@ -200,7 +200,11 @@ export async function POST(req: NextRequest) {
     //     Dedup guard: build a set of product IDs and names already on the renewal
     //     deal so re-processing never creates duplicate extension line items.
     let extDeals: Awaited<ReturnType<typeof getExtensionDealsForCompany>> = [];
-    if (hasExtension && company) {
+    // HARD RULE: always look up extensions ourselves — never trust the
+    // report's hasExtension flag alone. The report index once missed
+    // 'Buckeye Broadband (Fiber Clarity)' and Year 7 shipped without a
+    // $29k/yr line item because this branch was skipped.
+    if (!isNoc360 && company) {
       extDeals = await getExtensionDealsForCompany(company).catch(() => []);
 
       // Re-read current renewal line items (may have been cloned in step 4)
