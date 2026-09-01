@@ -1252,6 +1252,56 @@ function extractExtensionName(dealName: string): string {
   return dealName.trim();
 }
 
+// Weekly safety net: verify recently created renewal deals carry a line item
+// for every active extension deal their company has, and no duplicates.
+// Returns discrepancies only — an empty array means all clear.
+export async function auditRenewalExtensions(
+  sinceDays = 14
+): Promise<{ dealId: string; dealName: string; problem: string }[]> {
+  const cutoff = Date.now() - sinceDays * 86_400_000;
+  const recent = await searchDeals(
+    [
+      { propertyName: "pipeline", operator: "EQ", value: MSI_PIPELINE_ID },
+      { propertyName: "createdate", operator: "GTE", value: String(cutoff) },
+    ],
+    ["dealname", "createdate"],
+    100
+  ).catch(() => []);
+  // Yearly MSI renewals only — NOC360 yearly deals intentionally do not merge
+  // extension items (those bill on their own deals).
+  const renewals = recent.filter(
+    (d: any) =>
+      /\(MSI\s*[-–]?\s*Year\s+\d+\)/i.test(d.properties?.dealname ?? "") &&
+      !/NOC360 Renewal/i.test(d.properties?.dealname ?? "")
+  );
+  if (!renewals.length) return [];
+
+  const problems: { dealId: string; dealName: string; problem: string }[] = [];
+  for (const deal of renewals) {
+    const name: string = deal.properties?.dealname ?? "";
+    const parenIdx = name.indexOf(" (MSI");
+    const company = parenIdx > 0 ? name.slice(0, parenIdx).trim() : name.trim();
+    const [extDeals, items] = await Promise.all([
+      getExtensionDealsForCompany(company).catch(() => []),
+      getDealLineItems(String(deal.id)).catch(() => []),
+    ]);
+    const itemNames = items.map((i: any) => (i.properties?.name ?? "").trim());
+    const dupes = Array.from(new Set(itemNames.filter((n) => n && itemNames.filter((x) => x === n).length > 1)));
+    if (dupes.length) {
+      problems.push({ dealId: String(deal.id), dealName: name, problem: `duplicate line items: ${dupes.join(", ")}` });
+    }
+    const hasExtItem = itemNames.some((n) => /extension|pom|fom|clarity|outage|gis/i.test(n));
+    if (extDeals.length && !hasExtItem) {
+      problems.push({
+        dealId: String(deal.id),
+        dealName: name,
+        problem: `no extension line item despite active extension deal(s): ${extDeals.map((e) => e.extensionName).join(", ")}`,
+      });
+    }
+  }
+  return problems;
+}
+
 // Look up ALL active (non-terminated, non-closed-lost) extension deals for a company
 // and return each deal's ID + display name + line items so the process route can
 // copy them to the renewal deal. A company can have multiple extension deals (e.g. POM + FOM).

@@ -21,7 +21,12 @@ import {
   buildM1NoteHtml,
   type Misalignment,
 } from "@/lib/zuora";
-import { findCompanyIdLoose, getCompanyM1Note, createCompanyNote } from "@/lib/hubspot";
+import {
+  findCompanyIdLoose,
+  getCompanyM1Note,
+  createCompanyNote,
+  auditRenewalExtensions,
+} from "@/lib/hubspot";
 import { googleConfigured } from "@/lib/google";
 
 export const maxDuration = 300;
@@ -198,11 +203,40 @@ export async function GET(request: Request) {
       entry.noteId = noteId;
     }
 
+    // Weekly extensions audit: recently created renewal deals must carry a
+    // line item for every active extension their company has, no duplicates.
+    // Discrepancies become a task; all-clear stays silent.
+    const extAudit = await auditRenewalExtensions(14).catch((e) => {
+      console.warn("extensions audit failed:", e?.message ?? e);
+      return null;
+    });
+    let auditTaskId: string | null = null;
+    if (extAudit && extAudit.length && !dry) {
+      const weekTag = new Date().toISOString().slice(0, 10);
+      const subject = `Extensions audit: ${extAudit.length} discrepanc${extAudit.length === 1 ? "y" : "ies"} (${weekTag})`;
+      if (!(await taskExists(subject))) {
+        auditTaskId = await createAgreementTask(
+          subject,
+          [
+            "Weekly renewal extensions audit found discrepancies:",
+            "",
+            ...extAudit.map((p) => `- ${p.dealName} [deal ${p.dealId}]: ${p.problem}`),
+            "",
+            "Check the deal's line items against the company's active extension deals.",
+            "Created by AIC Zuora reconciliation (extensions audit).",
+          ],
+          null
+        ).catch(() => null);
+      }
+    }
+
     return NextResponse.json({
       report: { messageId: report.messageId, date: report.date, contracts: report.contracts.length },
       dryRun: dry,
       tookMs: Date.now() - startedAt,
       results,
+      extensionsAudit: extAudit === null ? "audit failed (see logs)" : extAudit.length ? extAudit : "all clear",
+      auditTaskId,
     });
   } catch (error: any) {
     console.error("Zuora reconcile error:", error);
