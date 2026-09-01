@@ -216,6 +216,19 @@ export async function POST(req: NextRequest) {
         renewalLineItems.map((li: any) => (li.properties?.name ?? "").toLowerCase()).filter(Boolean)
       );
 
+      // Prorated/bridge extension deals exist only to carry the extension
+      // until the subscription renews and everything aligns on one schedule.
+      // Once this renewal's items are merged, terminate them (identified by
+      // "prorated" in the name, or monthly-billed items — the annual-billing
+      // convention marks standing extension deals).
+      const isBridge = (ext: (typeof extDeals)[number]) =>
+        /prorat/i.test(ext.extensionName) ||
+        (ext.lineItems?.length > 0 &&
+          ext.lineItems.every(
+            (i: any) =>
+              (i.properties?.recurringbillingfrequency ?? "").toLowerCase() === "monthly"
+          ));
+
       for (const ext of extDeals) {
         if (ext.lineItems?.length) {
           await Promise.all(
@@ -241,6 +254,17 @@ export async function POST(req: NextRequest) {
             })
           );
         }
+      }
+
+      // Terminate prorated/bridge extension deals now that the renewal
+      // carries their items on the aligned schedule.
+      for (const ext of extDeals) {
+        if (!isBridge(ext)) continue;
+        await updateDealProperties(ext.id, {
+          service_terminated: new Date(expirationDate + "T00:00:00.000Z").getTime().toString(),
+        }).catch((e) => {
+          console.warn(`Bridge extension termination failed (${ext.extensionName}):`, e.message);
+        });
       }
     }
 
