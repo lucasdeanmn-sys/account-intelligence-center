@@ -221,6 +221,11 @@ export async function POST(req: NextRequest) {
               // Skip if the renewal deal already has this product or name
               if (productId && existingProductIds.has(productId)) return Promise.resolve(null);
               if (itemName && existingNames.has(itemName)) return Promise.resolve(null);
+              // Register BEFORE creating so two extension deals sharing a
+              // product in the same run can't both add it (All West got its
+              // POM item duplicated this way).
+              if (productId) existingProductIds.add(productId);
+              if (itemName) existingNames.add(itemName);
               return createLineItem(
                 renewalDealId!,
                 item.properties?.name ?? "MSI Extension",

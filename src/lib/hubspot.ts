@@ -684,8 +684,10 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
     ).catch(() => []),
     searchDeals(
       [
+        // Pipeline membership alone qualifies — requiring "MSI" in the name
+        // dropped deals like "Buckeye Broadband (Fiber Clarity)" and cost a
+        // $29k/yr line item on a processed renewal.
         { propertyName: "pipeline", operator: "EQ", value: MSI_EXTENSION_PIPELINE_ID },
-        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
       ],
       ["dealname", "service_terminated", "dealstage", "pipeline"],
       200
@@ -730,10 +732,13 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
     // Skip deals in a Closed Lost stage — the extension was never executed
     if (deal.properties?.dealstage && closedLostIds.has(deal.properties.dealstage)) continue;
     const name: string = deal.properties?.dealname ?? "";
-    const idx = name.indexOf(" (MSI");
+    const inExtPipe = deal.properties?.pipeline === MSI_EXTENSION_PIPELINE_ID;
+    let idx = name.indexOf(" (MSI");
+    if (idx <= 0 && inExtPipe) idx = name.indexOf(" (");
     if (idx <= 0) continue;
-    // Skip regular MSI renewal deals (Year N) — only extension-type deals belong here
-    if (/\bYear\s+\d+\b/i.test(name)) continue;
+    // Skip regular MSI renewal deals (Year N) — but keep extension deals whose
+    // names carry a year (e.g. "All West (MSI Extension - POM Year 1)").
+    if (/\bYear\s+\d+\b/i.test(name) && !/extension/i.test(name) && !inExtPipe) continue;
     const raw     = name.slice(0, idx).trim();
     const extName = extractExtensionName(name);
     // Store under exact lowercase key AND normalised key
@@ -1241,6 +1246,9 @@ function extractExtensionName(dealName: string): string {
   // Some companies have extension deals named without the "Extension" keyword.
   const msiMatch = dealName.match(/\(MSI\s*[-–]\s*([^)]+)\)/i);
   if (msiMatch) return msiMatch[1].replace(/\s*prorated\s*$/i, "").trim();
+  // Extensions-pipeline deals without MSI naming: "Company (Fiber Clarity)" → "Fiber Clarity"
+  const paren = dealName.match(/\(([^)]+)\)\s*$/);
+  if (paren) return paren[1].replace(/\s*prorated\s*$/i, "").trim();
   return dealName.trim();
 }
 
@@ -1261,8 +1269,10 @@ export async function getExtensionDealsForCompany(
     ).catch(() => []),
     searchDeals(
       [
+        // Pipeline membership alone qualifies — requiring "MSI" in the name
+        // dropped deals like "Buckeye Broadband (Fiber Clarity)" and cost a
+        // $29k/yr line item on a processed renewal.
         { propertyName: "pipeline", operator: "EQ", value: MSI_EXTENSION_PIPELINE_ID },
-        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
       ],
       ["dealname", "service_terminated", "dealstage", "pipeline"],
       200
@@ -1302,7 +1312,8 @@ export async function getExtensionDealsForCompany(
     // appears in the name (e.g. "Cleveland Utilities (MSI - POM)")
     const inExtPipeline = deal.properties?.pipeline === MSI_EXTENSION_PIPELINE_ID;
     if (!inExtPipeline && !/extension/i.test(name)) continue;
-    const idx = name.indexOf(" (MSI");
+    let idx = name.indexOf(" (MSI");
+    if (idx <= 0 && inExtPipeline) idx = name.indexOf(" (");
     if (idx <= 0) continue;
     const extCompany = name.slice(0, idx).trim().toLowerCase();
     if (extCompany !== needle && extCompany !== needleBase) continue;
