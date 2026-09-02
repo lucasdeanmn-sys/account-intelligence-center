@@ -3,44 +3,49 @@ import { getGoogleToken } from "./google";
 const SHEET_ID = "1qkiazR_nrcWAXgfk1BOR8z0lP00s2MLh40ieEj4onC4";
 const BASE = "https://sheets.googleapis.com/v4";
 
-async function sheetsGet(path: string): Promise<any> {
+// Google Sheets intermittently returns 503 UNAVAILABLE / 429 rate limits.
+// A single transient blip used to fail the whole write and force a full
+// re-process of the deal. Retry idempotent-safe cases with backoff before
+// surfacing the error.
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
+async function sheetsFetch(
+  method: string,
+  path: string,
+  body?: unknown,
+  attempt = 0
+): Promise<any> {
   const token = await getGoogleToken();
   const res = await fetch(`${BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     cache: "no-store", // stale sheet reads corrupt row matching
   });
-  if (!res.ok) throw new Error(`Sheets GET error ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    if (RETRYABLE.has(res.status) && attempt < 4) {
+      // 0.5s, 1s, 2s, 4s
+      await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+      return sheetsFetch(method, path, body, attempt + 1);
+    }
+    throw new Error(`Sheets ${method} error ${res.status}: ${await res.text()}`);
+  }
   return res.json();
+}
+
+async function sheetsGet(path: string): Promise<any> {
+  return sheetsFetch("GET", path);
 }
 
 async function sheetsPost(path: string, body: unknown): Promise<any> {
-  const token = await getGoogleToken();
-  const res = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`Sheets POST error ${res.status}: ${await res.text()}`);
-  return res.json();
+  return sheetsFetch("POST", path, body);
 }
 
 async function sheetsPut(path: string, body: unknown): Promise<any> {
-  const token = await getGoogleToken();
-  const res = await fetch(`${BASE}${path}`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`Sheets PUT error ${res.status}: ${await res.text()}`);
-  return res.json();
+  return sheetsFetch("PUT", path, body);
 }
 
 export interface RenewalSheetRow {
