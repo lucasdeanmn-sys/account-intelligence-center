@@ -729,23 +729,32 @@ export async function GET(req: NextRequest) {
         dealCSANameMap.get(deal.id) ??
         (nocInstanceId != null ? (instanceNameByIdMap.get(nocInstanceId) ?? null) : null);
 
-      // Name-based fallback: when get_company calls time out the csaIdMap is empty,
-      // but csaResult.instances still has circuit counts from the snapshot.
-      // If ID lookup failed, match by instance name so counts still show up.
-      const csaCountByName: number | null = (() => {
+      // Name-based fallback. The ID map is empty whenever CSA's renewal_date
+      // for these instances isn't in the report month — including the common
+      // case where the daily snapshot rolls the date forward a year the moment
+      // a term ticks over (observed 2026-09-01 → 2026-09-02: every September
+      // renewal jumped to 2027-09-30). We already KNOW these deals expire this
+      // month (HubSpot start-date match), so resolve their CSA instance by
+      // identity against the FULL snapshot records, not the month-filtered set.
+      const csaByName = (() => {
         if (csaCountById !== null || !csaResult) return null;
         const needle = csaInstanceNameRaw ?? company;
-        const inst = csaResult.instances.find(
-          (i) => companyNamesMatch(i.instanceName, needle)
+        const inInstances = csaResult.instances.find((i) =>
+          companyNamesMatch(i.instanceName, needle)
         );
-        return inst?.circuits ?? null;
+        if (inInstances) return { circuits: inInstances.circuits, name: inInstances.instanceName };
+        const inRecords = csaResult.records.find((r) =>
+          companyNamesMatch(r.instance, needle)
+        );
+        return inRecords ? { circuits: inRecords.circuits, name: inRecords.instance } : null;
       })();
 
-      const csaCount: number | null = csaCountById ?? csaCountByName;
+      const csaCount: number | null = csaCountById ?? csaByName?.circuits ?? null;
       const csaRounded: number | null =
         csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
-      // csaInstanceName already computed above as csaInstanceNameRaw.
-      const csaInstanceName: string | null = csaInstanceNameRaw;
+      // Prefer the resolved raw name; fall back to the record matched by the
+      // name-based snapshot search so the sheet still gets the canonical name.
+      const csaInstanceName: string | null = csaInstanceNameRaw ?? csaByName?.name ?? null;
 
       // Renewal count = max(order form, CSA rounded, current year license).
       // Order form sets the contracted floor, but if actual usage (CSA rounded)
@@ -822,11 +831,21 @@ export async function GET(req: NextRequest) {
       //     Legacy — M1 note prepends (Step 1) and pre-date-tag standalone deal notes.
       //     Still checked for backward compatibility.
       const rawNotes = notesByDealId.get(deal.id) ?? [];
+      // service_terminated is a HubSpot `date` property → reads back as
+      // "YYYY-MM-DD". Normalize (handles a stray ms value too) so date
+      // comparisons are apples-to-apples. "2000-01-01" is the legacy cancel
+      // sentinel's date form (CANCEL_SENTINEL is its ms epoch).
+      const svcTermDate = svcTerminated
+        ? /^\d+$/.test(String(svcTerminated))
+          ? new Date(Number(svcTerminated)).toISOString().slice(0, 10)
+          : String(svcTerminated).slice(0, 10)
+        : "";
+      const SENTINEL_DATE = "2000-01-01";
       const didNotRenew =
         freshDnrSet.has(deal.id) || deal.properties?.did_not_renew === "true";
       const cancelled =
         didNotRenew ||
-        svcTerminated === CANCEL_SENTINEL ||
+        svcTermDate === SENTINEL_DATE ||
         deal.properties?.dealstage === MSI_STAGE_DID_NOT_RENEW ||
         rawNotes.some((n: any) => {
           const body: string = n.properties?.hs_note_body ?? "";
@@ -834,12 +853,15 @@ export async function GET(req: NextRequest) {
           return body.includes("Did not renew");
         });
 
-      // processed: only if not cancelled, and either a billing-stage renewal deal
-      // exists OR service_terminated is a real date (not the cancel sentinel —
-      // and not a cancel-written real date, which `!cancelled` already excludes).
+      // processed: not cancelled, AND either a billing-stage renewal deal exists
+      // for the NEXT term, OR this deal's service_terminated matches THIS cycle's
+      // expiration date. Requiring the date to equal expirationDate is critical:
+      // a stale termination date from a prior year's renewal (e.g. Citynet's
+      // 2025-09-30) must NOT mark this cycle processed — that hid unrenewed
+      // deals as done.
       const processed = !cancelled && !!(
         (renewalDeal && renewalStage && processedStageIds.has(renewalStage)) ||
-        (svcTerminated && svcTerminated !== CANCEL_SENTINEL)
+        (svcTermDate && svcTermDate === expirationDate)
       );
 
       // Sheet note: M comes ONLY from the note title, N from the italic count.
