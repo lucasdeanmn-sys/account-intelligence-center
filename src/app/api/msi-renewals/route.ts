@@ -83,6 +83,11 @@ interface M1Parsed {
   /** Non-italic (not-yet-invoiced) MSI year numbers, sorted asc — used to
    *  detect broken italic runs (uninvoiced years below invoiced ones). */
   nonItalicYears: number[];
+  /** Billing-cycle start month (1-12) parsed from the note's
+   *  "MSI Term: MM/DD through MM/DD" line, or null when absent. Used to drop a
+   *  deal whose cycle has been shifted to a different month (e.g. Cherokee
+   *  moved Oct→March) but whose stale deal date still matches this report. */
+  msiTermStartMonth: number | null;
 }
 
 // Sheet note derivation now lives in src/lib/m1Note.ts (computeSheetNote):
@@ -125,7 +130,7 @@ function parseM1Note(
     );
   });
   if (!m1Notes.length) {
-    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [], termYears: null, italicCount: 0, italicYears: [], nonItalicYears: [] };
+    return { dealId, msiYear, nextMsiYear, orderFormLicense: null, currentYearLicense: null, m1NoteHtml: null, m1NoteId: null, allYearsInNote: [], termYears: null, italicCount: 0, italicYears: [], nonItalicYears: [], msiTermStartMonth: null };
   }
 
   // Pick the best note — always prefer the most recently created (highest note ID).
@@ -237,6 +242,12 @@ function parseM1Note(
     italicCount: italicEntries.size,
     italicYears: Array.from(italicEntries.keys()).sort((a, b) => a - b),
     nonItalicYears: Array.from(nonItalicEntries.keys()).sort((a, b) => a - b),
+    // "MSI Term: MM/DD through MM/DD" — the billing cycle. First month = cycle
+    // start. Authoritative over a stale deal start date.
+    msiTermStartMonth: (() => {
+      const m = html.match(/MSI\s*Term:\s*(\d{1,2})\s*\/\s*\d{1,2}/i);
+      return m ? parseInt(m[1], 10) : null;
+    })(),
   };
 }
 
@@ -696,8 +707,32 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Drop deals whose billing cycle has been shifted to a different month.
+    // A deal's subscription_start_date can go stale after a mid-term M1
+    // revision (Cherokee County shifted Oct→March to avoid October true-ups,
+    // but its old October-dated deal still matched the September report). The
+    // note's "MSI Term" month is authoritative; when it disagrees with this
+    // report's cycle month, the deal belongs to a different month.
+    const renewalStartMonth =
+      new Date(renewalStartDate + "T00:00:00.000Z").getUTCMonth() + 1;
+    const wrongCycle: { dealName: string; termMonth: number }[] = [];
+    const cycleFiltered = filtered.filter((deal: any) => {
+      const tm = parsedMap.get(deal.id)?.msiTermStartMonth ?? null;
+      if (tm != null && tm !== renewalStartMonth) {
+        wrongCycle.push({ dealName: deal.properties?.dealname ?? deal.id, termMonth: tm });
+        return false;
+      }
+      return true;
+    });
+    if (wrongCycle.length) {
+      console.log(
+        `[cycle] excluded ${wrongCycle.length} deal(s) whose MSI Term month ≠ ${renewalStartMonth}:`,
+        wrongCycle.map((w) => `${w.dealName} (month ${w.termMonth})`).join("; ")
+      );
+    }
+
     // Build enriched entries
-    const entries: RenewalEntry[] = filtered.map((deal: any) => {
+    const entries: RenewalEntry[] = cycleFiltered.map((deal: any) => {
       const company = extractCompany(deal.properties?.dealname ?? "");
       const parsed = parsedMap.get(deal.id) ?? {
         dealId: deal.id,
@@ -1073,7 +1108,7 @@ export async function GET(req: NextRequest) {
     const csaInstances: CsaInstance[] = csaResult?.allInstances ?? [];
     const csaError: string | null = csaResult === null ? "CSA data unavailable" : null;
 
-    return NextResponse.json({ deals: entries, expirationDate, renewalStartDate, csaInstances, csaError, _csaDebug });
+    return NextResponse.json({ deals: entries, expirationDate, renewalStartDate, csaInstances, csaError, excludedWrongCycle: wrongCycle, _csaDebug });
   } catch (error: any) {
     console.error("MSI renewals GET error:", error);
     return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
