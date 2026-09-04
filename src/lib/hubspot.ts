@@ -1443,17 +1443,29 @@ export async function appendAutoRenewalEntry(
       : false;
   const AUTO = " (Auto-renew)";
 
-  // Helper: given the text after "Year N - ", rewrite it to show the billing
-  // amount as the main figure. Paren-only entries like "(41,500)" become
-  // "45,350 (41,500)"; entries whose main count already equals renewalCount
-  // are returned unchanged; others are also left as-is. Beyond-term entries
-  // get the "(Auto-renew)" marker if missing.
+  // Helper: given the text after "Year N - ", rewrite it so the amount actually
+  // billed leads and the contracted order-form quantity sits in parentheses
+  // after it. Cases:
+  //   "(41,500)"        → "45,350 (41,500)"   paren-only
+  //   "14,000"          → "15,000 (14,000)"   plain figure was the contracted one
+  //   "14,000 (13,500)" → "15,000 (13,500)"   lead refreshed, contracted kept
+  //   "15,000 (14,000)" → unchanged           already billing this amount
+  // Non-numeric leads (e.g. "Current Sub Count (13,455)") are left alone —
+  // there's no contracted number to preserve. Beyond-term entries get the
+  // "(Auto-renew)" marker if missing.
+  const digits = (v: string) => v.replace(/,/g, "");
   function rewriteSuffix(suffix: string): string {
     let s = suffix.trim();
-    const parenOnlyM = s.match(/^\((\d[\d,]*)\)/);
+    const parenOnlyM = s.match(/^\((\d[\d,]*)\)(.*)$/);
     if (parenOnlyM) {
-      // Paren-only "(41,500)" → "45,350 (41,500)"
-      s = `${formatted} (${parenOnlyM[1]})`;
+      s = `${formatted} (${parenOnlyM[1]})${parenOnlyM[2]}`;
+    } else {
+      // Lead number, an optional numeric parenthetical, then any trailing
+      // marker such as " (Auto-renew)" — which must not be read as a quantity.
+      const m = s.match(/^(\d[\d,]*)(?:\s*\((\d[\d,]*)\))?(.*)$/);
+      if (m && digits(m[1]) !== digits(formatted)) {
+        s = `${formatted} (${m[2] ?? m[1]})${m[3]}`;
+      }
     }
     if (isBeyondTerm && !/auto[- ]?renew/i.test(s)) s += AUTO;
     return s;
@@ -1467,10 +1479,9 @@ export async function appendAutoRenewalEntry(
   const italicMatch = alreadyItalicRe.exec(html);
   if (italicMatch) {
     const suffix = italicMatch[3].trim();
-    const needsParenRewrite = /^\([\d,]+\)/.test(suffix);
-    const needsAutoMarker = isBeyondTerm && !/auto[- ]?renew/i.test(suffix);
-    if (needsParenRewrite || needsAutoMarker) {
-      const newInner = `MSI Year ${nextMsiYear} - ${rewriteSuffix(suffix)}`;
+    const rewritten = rewriteSuffix(suffix);
+    if (rewritten !== suffix) {
+      const newInner = `MSI Year ${nextMsiYear} - ${rewritten}`;
       await updateNoteBody(noteId, html.replace(alreadyItalicRe,
         (_, open, _inner, _suffix, close) => `${open}${newInner}${close}`
       ));
