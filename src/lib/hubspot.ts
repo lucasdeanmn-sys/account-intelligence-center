@@ -1014,6 +1014,26 @@ export async function createMsiRenewalDeal(
   };
   if (pipelineId) properties.pipeline = pipelineId;
   if (stageId) properties.dealstage = stageId;
+
+  // Resilience: HubSpot rejects the whole create if any ONE property no longer
+  // exists in the portal schema (e.g. subscription_term was deleted). Rather
+  // than hard-fail the renewal, strip the offending property/properties named
+  // in the error and retry — core fields (dealname, dates, stage) are never
+  // the culprit, so the deal still lands correctly.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await hs("POST", "/crm/v3/objects/deals", { properties });
+    } catch (e: any) {
+      const names: string[] = Array.from(
+        String(e?.message ?? "").matchAll(/Property\s+\\?"([a-z0-9_]+)\\?"\s+does not exist/gi)
+      ).map((m) => m[1]);
+      const toStrip = names.filter((n) => n in properties);
+      if (!toStrip.length) throw e;
+      for (const n of toStrip) delete properties[n];
+      console.warn(`createMsiRenewalDeal: dropped non-existent propert${toStrip.length === 1 ? "y" : "ies"} ${toStrip.join(", ")} and retrying`);
+    }
+  }
+  // Final attempt (lets the real error surface if it still fails)
   return hs("POST", "/crm/v3/objects/deals", { properties });
 }
 
@@ -1023,7 +1043,8 @@ const COPYABLE_DEAL_FIELDS = [
   "channel_partner",
   "lead_source",
   "type_of_billing",
-  "subscription_term",
+  // "subscription_term" removed 2026-10: property deleted from the portal
+  // (createMsiRenewalDeal now also self-heals if another field is removed).
   "of_subs_license_",
   "deal_currency_code",
 ] as const;
