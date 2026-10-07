@@ -145,6 +145,25 @@ export interface RenewalEntry {
    *  instance ID (e.g. a sub-tenant). The displayed circuit count is already the
    *  sum, but the entry is flagged so you can double-check the breakdown. */
   multiTenant?: boolean;
+  /** Set when the signed M1 order form / note disagrees with what NOCAdmin
+   *  (CSA snapshot) currently has — either the billing-cycle month or the
+   *  contracted license count. Surfaces an "Update NOCAdmin" flag so the
+   *  backend gets corrected before the stale value feeds the next renewal.
+   *  Null when NOCAdmin and the order form agree (or data is missing). */
+  nocAdminDrift?: {
+    /** Which signals drifted: "cycle" (renewal month) and/or "count" (license count). */
+    kinds: Array<"cycle" | "count">;
+    /** Human-readable summary for the tooltip / notice. */
+    message: string;
+    /** M1 note "MSI Term" start month (1-12), when parsed. */
+    noteMonth?: number | null;
+    /** NOCAdmin/CSA renewal_date month (1-12), when known. */
+    csaMonth?: number | null;
+    /** Contracted license count from the M1 order form / note. */
+    orderFormCount?: number | null;
+    /** license_count NOCAdmin/CSA currently holds. */
+    nocLicenseCount?: number | null;
+  } | null;
 }
 
 export interface TaskCreate {

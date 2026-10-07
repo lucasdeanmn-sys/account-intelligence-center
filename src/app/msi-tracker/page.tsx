@@ -438,6 +438,13 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
                 No M1 note
               </span>
             )}
+            {/* Signed order form disagrees with NOCAdmin (cycle month or license count) */}
+            {entry.nocAdminDrift && (
+              <span className="inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f9731615", color: "#fb923c" }}
+                title={entry.nocAdminDrift.message}>
+                ⚠ Update NOCAdmin
+              </span>
+            )}
           </div>
           <p className="text-xs mt-0.5 truncate" style={{ color: "#64748b" }}>
             {entry.currentDealName}
@@ -447,6 +454,12 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
             <p className="text-xs mt-1 truncate" style={{ color: "#8b93a7" }} title={entry.needsReviewReason}>
               <span style={{ color: "#f87171" }}>⚠ </span>
               {entry.needsReviewReason}
+            </p>
+          )}
+          {entry.nocAdminDrift && (
+            <p className="text-xs mt-1 truncate" style={{ color: "#c98a5a" }} title={entry.nocAdminDrift.message}>
+              <span style={{ color: "#fb923c" }}>⚠ </span>
+              {entry.nocAdminDrift.message}
             </p>
           )}
         </div>

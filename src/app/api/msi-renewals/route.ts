@@ -63,6 +63,84 @@ function addOneYear(isoDate: string): string {
   return d.toISOString().split("T")[0];
 }
 
+const MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Detect drift between the signed M1 order form / note and what NOCAdmin (the
+// CSA snapshot) currently holds, so the backend gets corrected before its stale
+// value feeds the next renewal. Two independent, advisory signals:
+//
+//   cycle — the note's "MSI Term" start month disagrees with CSA's renewal_date
+//           month (a mid-term billing-cycle shift, e.g. Consolidated 11/1 → 6/1).
+//           Month-only comparison, so it's immune to the known CSA year-roll bug
+//           (renewal_date's YEAR ticks forward overnight; the MONTH is stable).
+//
+//   count — NOCAdmin's license_count matches NEITHER the order form NOR actual
+//           usage (circuits). That's the signature of a stale/wrong count
+//           (e.g. Lenoir: order form 5,000, usage ~5,366, but NOCAdmin 12,000).
+//           A growth account — where NOCAdmin tracks usage above the order-form
+//           floor — is NOT flagged, because license_count still matches circuits.
+function computeNocAdminDrift(args: {
+  noteMonth: number | null;
+  csaRenewalDate: string | null;
+  orderFormCount: number | null;
+  nocLicenseCount: number | null;
+  actualCircuits: number | null;
+  hasNote: boolean;
+}): RenewalEntry["nocAdminDrift"] {
+  const { noteMonth, csaRenewalDate, orderFormCount, nocLicenseCount, actualCircuits, hasNote } = args;
+  if (!hasNote) return null; // no signed order form to compare against
+
+  const csaMonth =
+    csaRenewalDate && /^\d{4}-\d{2}/.test(csaRenewalDate)
+      ? parseInt(csaRenewalDate.slice(5, 7), 10)
+      : null;
+
+  // Material difference: more than 100 subs AND more than 2% — filters routine
+  // true-up/rounding noise while catching real mismatches.
+  const material = (a: number, b: number) =>
+    Math.abs(a - b) > 100 && Math.abs(a - b) > 0.02 * Math.max(a, b);
+
+  const kinds: Array<"cycle" | "count"> = [];
+  const parts: string[] = [];
+
+  // CSA's renewal_date is the term END (expiration) — the day before the new
+  // term starts — so for a 7/1 term start it reads 6/30. The matching
+  // expiration month is therefore (note start month − 1). Compare on that basis
+  // so an aligned cycle (Lenoir 7/1 start vs 6/30 renewal) isn't false-flagged.
+  if (noteMonth != null && csaMonth != null) {
+    const expectedExpMonth = noteMonth === 1 ? 12 : noteMonth - 1;
+    if (csaMonth !== expectedExpMonth) {
+      kinds.push("cycle");
+      parts.push(
+        `billing cycle — order form starts ${MONTH_ABBR[noteMonth]}, but NOCAdmin renews ${MONTH_ABBR[csaMonth]} (expected ${MONTH_ABBR[expectedExpMonth]})`
+      );
+    }
+  }
+
+  if (
+    orderFormCount != null &&
+    nocLicenseCount != null &&
+    material(nocLicenseCount, orderFormCount) &&
+    (actualCircuits == null || material(nocLicenseCount, actualCircuits))
+  ) {
+    kinds.push("count");
+    parts.push(
+      `license count — order form ${orderFormCount.toLocaleString()}, NOCAdmin ${nocLicenseCount.toLocaleString()}` +
+        (actualCircuits != null ? `, actual usage ${actualCircuits.toLocaleString()}` : "")
+    );
+  }
+
+  if (!kinds.length) return null;
+  return {
+    kinds,
+    message: `Update NOCAdmin — ${parts.join("; ")}.`,
+    noteMonth,
+    csaMonth,
+    orderFormCount,
+    nocLicenseCount,
+  };
+}
+
 interface M1Parsed {
   dealId: string;
   msiYear: number | null;
@@ -747,6 +825,7 @@ export async function GET(req: NextRequest) {
         italicCount: 0,
         italicYears: [] as number[],
         nonItalicYears: [] as number[],
+        msiTermStartMonth: null,
       };
       const msiYear = parsed.msiYear ?? extractYearFromName(deal.properties?.dealname ?? "");
       const nextMsiYear = msiYear ? msiYear + 1 : null;
@@ -790,6 +869,23 @@ export async function GET(req: NextRequest) {
       // Prefer the resolved raw name; fall back to the record matched by the
       // name-based snapshot search so the sheet still gets the canonical name.
       const csaInstanceName: string | null = csaInstanceNameRaw ?? csaByName?.name ?? null;
+
+      // Full CSA snapshot record for this company (carries license_count and
+      // renewal_date, which the ID/name circuit lookups above don't surface).
+      // Used only for NOCAdmin-drift detection — best-effort, no flag when unresolved.
+      const csaDriftRec = csaResult
+        ? csaResult.records.find((r) =>
+            companyNamesMatch(r.instance, csaInstanceName ?? company)
+          ) ?? null
+        : null;
+      const nocAdminDrift = computeNocAdminDrift({
+        noteMonth: parsed.msiTermStartMonth ?? null,
+        csaRenewalDate: csaDriftRec?.renewalDate ?? null,
+        orderFormCount: orderFormLicense ?? currentYearLicense ?? null,
+        nocLicenseCount: csaDriftRec?.licenseCount ?? null,
+        actualCircuits: csaCount,
+        hasNote: !!parsed.m1NoteId,
+      });
 
       // Renewal count = max(order form, CSA rounded, current year license).
       // Order form sets the contracted floor, but if actual usage (CSA rounded)
@@ -937,6 +1033,7 @@ export async function GET(req: NextRequest) {
         processed,
         cancelled,
         multiTenant,
+        nocAdminDrift,
       };
     });
 
