@@ -246,8 +246,15 @@ function EmailModal({ subject, body, to, deals, onClose }: EmailModalProps) {
     }
   }
 
+  // Pin the compose window to the 7Sigma account. Without authuser, Gmail
+  // opens compose under whichever Google account is active in the browser —
+  // which repeatedly turned out to be a personal Gmail, so renewal emails went
+  // out from the wrong address. authuser=<email> forces the right account
+  // (falls back gracefully to the default account if that one isn't signed in).
+  const SENDER = "ldean@7sigma.com";
   const gmailUrl =
     `https://mail.google.com/mail/?view=cm&fs=1` +
+    `&authuser=${encodeURIComponent(SENDER)}` +
     `&to=${encodeURIComponent(to.join(","))}` +
     `&su=${encodeURIComponent(subject)}` +
     `&body=${encodeURIComponent(body)}`;
