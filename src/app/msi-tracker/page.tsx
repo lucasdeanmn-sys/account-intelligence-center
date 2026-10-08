@@ -453,8 +453,10 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
                 Auto-renew
               </span>
             )}
-            {/* NOC360 renewals have no M1 note by design — the flag is MSI-only */}
-            {entry.orderFormLicense === null && entry.currentYearLicense === null && !entry.m1NoteId && entry.platform !== "NOC360" && (
+            {/* NOC360 renewals have no M1 note by design; billing-queue rows are
+                recovered straight from the Ready-for-Billing deal and never carry
+                the note either — so the flag is MSI, note-path rows only. */}
+            {entry.orderFormLicense === null && entry.currentYearLicense === null && !entry.m1NoteId && entry.platform !== "NOC360" && !entry.billingQueueOnly && (
               <span className="hidden sm:inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#ef444415", color: "#ef4444" }}>
                 No M1 note
               </span>
@@ -483,7 +485,12 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
           </div>
           <p className="text-xs mt-0.5 truncate" style={{ color: "#64748b" }}>
             {entry.currentDealName}
-            {entry.msiYear && ` · Year ${entry.msiYear} → ${entry.nextMsiYear ?? "?"}`}
+            {/* Billing-queue rows already ARE the renewal deal (Year N), so show
+                just "Year N" — not the "Year N → N" the normal path renders. */}
+            {entry.msiYear &&
+              (entry.billingQueueOnly
+                ? ` · Year ${entry.msiYear}`
+                : ` · Year ${entry.msiYear} → ${entry.nextMsiYear ?? "?"}`)}
           </p>
           {entry.needsReview && entry.needsReviewReason && (
             <p className="text-xs mt-1 truncate" style={{ color: "#8b93a7" }} title={entry.needsReviewReason}>
