@@ -1148,7 +1148,33 @@ export async function GET(req: NextRequest) {
             ).catch(() => []),
           ])
         : [[], []];
-    for (const inst of noc360Instances) {
+    // Collapse multi-record NOC360 instances into one row per company. CSA can
+    // return several records under one instance name (sub-tenants) — Premier
+    // Communications had three (1,309 / 1,697 / 30,337 circuits) that should
+    // bill as a single line, not three. Group by instance_id when present, else
+    // by instance name; sum raw circuits THEN round (summing pre-rounded values
+    // would double-count the rounding). _count>1 marks an aggregated row.
+    const noc360Grouped = (() => {
+      const groups = new Map<string, CsaInstance & { _count: number }>();
+      for (const inst of noc360Instances) {
+        const key =
+          inst.instanceId != null
+            ? `id:${inst.instanceId}`
+            : `name:${inst.instanceName.toLowerCase().trim()}`;
+        const g = groups.get(key);
+        if (g) {
+          g.circuits = (g.circuits ?? 0) + (inst.circuits ?? 0);
+          if (inst.licenseCount != null) g.licenseCount = (g.licenseCount ?? 0) + inst.licenseCount;
+          // Active if ANY record is active (only skip when every record is Disabled).
+          if (inst.status !== "Disabled" && g.status === "Disabled") g.status = inst.status;
+          g._count += 1;
+        } else {
+          groups.set(key, { ...inst, _count: 1 });
+        }
+      }
+      return Array.from(groups.values());
+    })();
+    for (const inst of noc360Grouped) {
       if (inst.status === "Disabled") continue;
       const csaCount = inst.circuits ?? null;
       const csaRounded =
@@ -1200,7 +1226,7 @@ export async function GET(req: NextRequest) {
         extensionNames: [],
         processed: !!(existingDeal && existingStage && processedStageIds.has(existingStage)),
         cancelled: noc360Cancelled,
-        multiTenant: false,
+        multiTenant: inst._count > 1,
       });
     }
 
