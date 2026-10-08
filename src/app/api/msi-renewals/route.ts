@@ -1180,10 +1180,13 @@ export async function GET(req: NextRequest) {
       const csaRounded =
         csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
       const lic = inst.licenseCount ?? null;
-      const renewalCount =
-        lic !== null || csaRounded !== null
-          ? Math.max(lic ?? 0, csaRounded ?? 0)
-          : null;
+      // NOC360 bills ACTUAL monitored usage (rounded), not a license floor. The
+      // CSA license_count isn't a reliable contractual floor — it runs high or
+      // stale for some accounts (Premier reads 84,000 vs a 28,000 agreement;
+      // PVT's 7,450 predates its DSL churn), so flooring on it over-bills. The
+      // license is surfaced for reference (Order Form column) only. Fall back to
+      // it solely when there's no usage figure at all.
+      const renewalCount = csaRounded ?? lic ?? null;
       const noc360DealName = `${inst.instanceName} (NOC360 Renewal - ${renewalYear})`;
       const existingDeal = existingNoc360Deals.find(
         (d) => d.properties?.dealname === noc360DealName

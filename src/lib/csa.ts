@@ -328,13 +328,12 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
       return await callMcp("get_company", { name }, 20_000);
     }
   };
-  const results = await Promise.allSettled(
-    targets.map((r) =>
-      r.platform === "NOC360"
-        ? Promise.resolve(null) // NOC360 renewals skip MSI deal matching — no ID needed
-        : callWithRetry(r.instance)
-    )
-  );
+  // Resolve every target against get_company — including NOC360. The bulk
+  // snapshot (get_snapshot) omits license_count, but the per-company lookup
+  // carries it, so NOC360 renewals were missing their license floor entirely
+  // (PVT: snapshot gave null, get_company gives 7,450). MSI still needs the
+  // call for instance_id; NOC360 now needs it for license_count.
+  const results = await Promise.allSettled(targets.map((r) => callWithRetry(r.instance)));
 
   const resolvedInstances: CsaInstance[] = [];
 
@@ -343,9 +342,10 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
     const res = results[j];
     let instanceId: number | null = null;
     let circuits = target.circuits;
+    let resolvedLicense: number | null = null;
 
     if (res.status === "fulfilled" && res.value) {
-      // get_company returns { companies: [{ instance_id, instance_name, circuits, ... }] }
+      // get_company returns { companies: [{ instance_id, instance_name, circuits, license_count, ... }] }
       const companies: any[] = res.value?.companies ?? [];
       const match =
         companies.find(
@@ -357,7 +357,14 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
             )
         ) ?? companies[0];
 
-      if (match?.instance_id != null) {
+      // license_count from the per-company lookup (the bulk snapshot omits it).
+      const rawLic = match?.license_count;
+      if (rawLic != null && !isNaN(parseInt(String(rawLic), 10))) {
+        resolvedLicense = parseInt(String(rawLic), 10);
+      }
+
+      // instance_id / circuit accumulation is MSI-only (NOC360 doesn't match deals by ID).
+      if (match?.instance_id != null && target.platform !== "NOC360") {
         instanceId = match.instance_id as number;
         // Use target.circuits (from the snapshot) rather than match.circuits (from
         // get_company). The snapshot already has correct per-company circuit counts
@@ -380,7 +387,8 @@ export async function fetchCsaForMonth(expirationDate: string): Promise<CsaMonth
       domain: target.domain,
       status: target.status,
       platform: target.platform,
-      licenseCount: target.licenseCount,
+      // Prefer the per-company license_count; fall back to the snapshot's (if any).
+      licenseCount: resolvedLicense ?? target.licenseCount,
     });
   }
 
