@@ -5,7 +5,6 @@ import { getRenewalBilledCounts } from "@/lib/hubspot";
 export const maxDuration = 30;
 
 const RECIPIENTS = [
-  "sherry.woodruff@adtran.com",
   "liliana.mckune@adtran.com",
   "lloyd.mcdonald@adtran.com",
   "kathleen.walsh@adtran.com",
