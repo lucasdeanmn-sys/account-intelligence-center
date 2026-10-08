@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { RenewalEntry } from "@/lib/types";
 import { getRenewalDealInfo } from "@/lib/hubspot";
+import type { RenewalDealInfo } from "@/lib/hubspot";
 
 export const maxDuration = 30;
 
@@ -39,7 +40,7 @@ export async function POST(req: NextRequest) {
       .map((d) => d.renewalDealId)
       .filter((id): id is string => !!id);
     const infoByDeal = await getRenewalDealInfo(renewalDealIds).catch(
-      () => new Map<string, { billedQty: number | null; extensions: string[] }>()
+      () => new Map<string, RenewalDealInfo>()
     );
 
     const formatLine = (d: RenewalEntry): string => {
@@ -53,15 +54,23 @@ export async function POST(req: NextRequest) {
       const note = d.sheetNote
         ? d.sheetNote.replace(/\s+on existing M1 agreement$/i, "")
         : null;
-      // Extensions from the deal's line items; fall back to the report's list.
-      const extensions =
+      // Extension labels from the deal's line items; fall back to the report's
+      // names. Nuvera is a one-off exception where the extension bills on a
+      // different quantity than the MSI count (POM on fiber circuits), so its
+      // line shows the POM quantity — e.g. "(Auto-renewal, 22,300 POM)".
+      const nuveraException = /\bnuvera\b/i.test(d.company);
+      const extLabels =
         info?.extensions && info.extensions.length > 0
-          ? info.extensions
+          ? info.extensions.map((e) =>
+              nuveraException && e.qty != null
+                ? `${e.qty.toLocaleString()} ${e.name}`
+                : e.name
+            )
           : d.extensionNames ?? [];
-      // Combine note + extension names into a single parenthetical so the line
+      // Combine note + extension labels into a single parenthetical so the line
       // stays on one row — Gmail strips leading-space indentation when converting
       // plain text to HTML, making separate sub-bullet lines merge into the main.
-      const parts = [note, ...extensions].filter(Boolean);
+      const parts = [note, ...extLabels].filter(Boolean);
       const notePart = parts.length > 0 ? ` (${parts.join(", ")})` : "";
       return `• ${d.company} — ${count}${notePart}`;
     };

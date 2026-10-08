@@ -898,10 +898,17 @@ export async function getRenewalBilledCounts(
 // really bills, instead of the active-extension index — which drops an extension
 // the moment its standalone deal is terminated, even though it's now a line item
 // on the renewal (Nuvera's POM did exactly this).
+export interface RenewalDealInfo {
+  billedQty: number | null;
+  /** Extensions on the deal, each with its own quantity — the quantity matters
+   *  when it differs from the base count (e.g. Nuvera POM bills on fiber
+   *  circuits, 22,300, not the 33,000 MSI count). */
+  extensions: { name: string; qty: number | null }[];
+}
 export async function getRenewalDealInfo(
   dealIds: string[]
-): Promise<Map<string, { billedQty: number | null; extensions: string[] }>> {
-  const out = new Map<string, { billedQty: number | null; extensions: string[] }>();
+): Promise<Map<string, RenewalDealInfo>> {
+  const out = new Map<string, RenewalDealInfo>();
   const ids = dealIds.filter(Boolean);
   if (!ids.length) return out;
   const assoc = await batchReadAssociations("deals", "line_items", ids);
@@ -920,13 +927,14 @@ export async function getRenewalDealInfo(
       : Math.max(0, ...items.map((l: any) => Number(l.properties?.quantity) || 0));
     const extensions = items
       .filter((l: any) => /extension/i.test(l.properties?.name ?? ""))
-      .map((l: any) =>
-        (l.properties?.name ?? "")
+      .map((l: any) => ({
+        name: (l.properties?.name ?? "")
           .replace(/^\s*MSI\s+Extension\s*[-–—]?\s*/i, "")
           .replace(/\s*\([^)]*\)\s*$/, "")
-          .trim()
-      )
-      .filter(Boolean);
+          .trim(),
+        qty: Number(l.properties?.quantity) || null,
+      }))
+      .filter((e: { name: string }) => e.name);
     out.set(dealId, { billedQty: billedQty > 0 ? billedQty : null, extensions });
   }
   return out;
