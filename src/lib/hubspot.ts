@@ -861,6 +861,37 @@ export async function getDealLineItems(dealId: string): Promise<any[]> {
   ]).catch(() => []);
 }
 
+// Batched: for a set of deal IDs, return the MSI quantity HubSpot will actually
+// invoice — the base MSI line item's quantity (non-extension line), or the max
+// line-item quantity when no obvious base line is found. Lets the renewal email
+// report exactly what's on the deal, instead of a separately-computed report
+// figure that can drift from the line item (e.g. Fiber Connect: line item 1,600
+// but the emailed figure said 1,000).
+export async function getRenewalBilledCounts(
+  dealIds: string[]
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const ids = dealIds.filter(Boolean);
+  if (!ids.length) return out;
+  const assoc = await batchReadAssociations("deals", "line_items", ids);
+  const allLiIds = Array.from(new Set(Array.from(assoc.values()).flat()));
+  const liList = await batchRead("line_items", allLiIds, ["name", "quantity"]).catch(() => []);
+  const liById = new Map<string, any>(liList.map((l: any) => [String(l.id), l]));
+  for (const dealId of ids) {
+    const items = (assoc.get(dealId) ?? []).map((id) => liById.get(id)).filter(Boolean);
+    if (!items.length) continue;
+    const base = items.find(
+      (l: any) =>
+        /^MSI\b/i.test(l.properties?.name ?? "") && !/extension/i.test(l.properties?.name ?? "")
+    );
+    const qty = base
+      ? Number(base.properties?.quantity)
+      : Math.max(0, ...items.map((l: any) => Number(l.properties?.quantity) || 0));
+    if (qty > 0) out.set(dealId, qty);
+  }
+  return out;
+}
+
 export async function updateNoteBody(noteId: string, htmlBody: string) {
   return hs("PATCH", `/crm/v3/objects/notes/${noteId}`, {
     properties: { hs_note_body: htmlBody },

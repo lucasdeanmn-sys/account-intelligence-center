@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { RenewalEntry } from "@/lib/types";
+import { getRenewalBilledCounts } from "@/lib/hubspot";
 
 export const maxDuration = 30;
 
@@ -29,8 +30,21 @@ export async function POST(req: NextRequest) {
 
     const renewals = [...deals].sort((a, b) => a.company.localeCompare(b.company));
 
+    // Report the quantity actually on the renewal deal in HubSpot (what gets
+    // invoiced), not the report's pre-process figure — these can drift (Fiber
+    // Connect: line item 1,600, emailed figure 1,000). For any renewal deal
+    // that exists, the line-item quantity wins; otherwise fall back to the
+    // report's renewalCount.
+    const renewalDealIds = renewals
+      .map((d) => d.renewalDealId)
+      .filter((id): id is string => !!id);
+    const billedByDeal = await getRenewalBilledCounts(renewalDealIds).catch(
+      () => new Map<string, number>()
+    );
+
     const formatLine = (d: RenewalEntry): string => {
-      const count = d.renewalCount?.toLocaleString() ?? "TBD";
+      const actual = d.renewalDealId ? billedByDeal.get(d.renewalDealId) : undefined;
+      const count = (actual ?? d.renewalCount)?.toLocaleString() ?? "TBD";
       if (isNoc360) {
         // NOC360 lines are plain company + count — no M1 note/extension context.
         return `• ${d.company} — ${count}`;

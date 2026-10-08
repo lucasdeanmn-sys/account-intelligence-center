@@ -272,6 +272,20 @@ function EmailModal({ subject, body, to, deals, onClose }: EmailModalProps) {
           </button>
         </div>
         <div className="p-5 overflow-y-auto flex-1">
+          {/* Termination check — CSA shows these churned, yet they're in the list */}
+          {deals.some((d) => d.terminationRisk) && (
+            <div className="mb-4 px-4 py-3 rounded-lg text-xs" style={{ backgroundColor: "#ef444415", color: "#f87171" }}>
+              <p className="font-semibold mb-1">⚠ Possible terminations — review before sending</p>
+              <p className="mb-1.5" style={{ color: "#fca5a5" }}>
+                CSA shows {deals.filter((d) => d.terminationRisk).length === 1 ? "this account" : "these accounts"} Disabled (churned). Remove from the email if they should not be billed:
+              </p>
+              <ul className="list-disc pl-4">
+                {deals.filter((d) => d.terminationRisk).map((d) => (
+                  <li key={d.currentDealId}>{d.company}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           <p className="text-xs mb-1" style={{ color: "#64748b" }}>Subject</p>
           <p className="text-sm text-white mb-4 font-medium">{subject}</p>
           <p className="text-xs mb-1" style={{ color: "#64748b" }}>Body</p>
@@ -450,6 +464,20 @@ function DealRow({ entry, onProcess, onCancel, onUnprocess }: DealRowProps) {
               <span className="inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f9731615", color: "#fb923c" }}
                 title={entry.nocAdminDrift.message}>
                 ⚠ Update NOCAdmin
+              </span>
+            )}
+            {/* CSA shows the account churned but it isn't marked cancelled — don't bill it */}
+            {entry.terminationRisk && (
+              <span className="inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#ef444415", color: "#ef4444" }}
+                title="CSA shows this account Disabled (churned). Confirm it should NOT be billed before emailing.">
+                ⚠ Churned — verify
+              </span>
+            )}
+            {/* Recovered from the HubSpot billing queue after the normal matching missed it */}
+            {entry.billingQueueOnly && (
+              <span className="inline-flex shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f9731615", color: "#fb923c" }}
+                title="In the HubSpot billing queue for this cycle but missed by date/CSA matching. Verify it belongs on this month's list.">
+                Billing queue
               </span>
             )}
           </div>

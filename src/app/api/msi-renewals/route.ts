@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, searchDeals, getDealsByIds, getDealNotesBatch, getDealCompanyMap, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, normExtCo, CANCEL_SENTINEL, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, searchDeals, getDealsByIds, getDealNotesBatch, getDealCompanyMap, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, getRenewalBilledCounts, normExtCo, CANCEL_SENTINEL, MSI_STAGE_READY, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
 import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
@@ -1034,6 +1034,10 @@ export async function GET(req: NextRequest) {
         cancelled,
         multiTenant,
         nocAdminDrift,
+        csaStatus: csaDriftRec?.status ?? null,
+        // CSA shows the account churned (Disabled) but it isn't marked cancelled
+        // yet — it would otherwise be billed. Flag so the termination is caught.
+        terminationRisk: csaDriftRec?.status === "Disabled" && !cancelled,
       };
     });
 
@@ -1198,6 +1202,70 @@ export async function GET(req: NextRequest) {
         cancelled: noc360Cancelled,
         multiTenant: false,
       });
+    }
+
+    // ── Billing-queue cross-check ───────────────────────────────────────────
+    // A renewal deal sitting in "Ready for Billing" for THIS cycle that the
+    // normal date/CSA matching didn't surface means a company is staged to bill
+    // but fell off the list (Joan: "it's in the Hubspot billing que but not on
+    // this list"). Recover each as a row so it's visible and gets emailed.
+    //
+    // Scope to Ready-for-Billing only — NOT Invoiced. An Invoiced renewal is
+    // done and Joan already billed it; re-surfacing every completed renewal
+    // whose expiring deal has rolled off the active list is pure noise (a past
+    // month showed 21 Invoiced renewals that way). "Billing queue" = staged,
+    // not yet invoiced.
+    const representedRenewalIds = new Set(
+      entries.map((e) => e.renewalDealId).filter((id): id is string => !!id)
+    );
+    const queueCandidates = renewalDeals.filter((d: any) => {
+      const name = d.properties?.dealname ?? "";
+      if (/extension/i.test(name) || !/\bYear\b/i.test(name)) return false;
+      if (d.properties?.dealstage !== MSI_STAGE_READY) return false;
+      if (representedRenewalIds.has(String(d.id))) return false;
+      const co = extractCompany(name);
+      return !entries.some((e) => companyNamesMatch(e.company, co));
+    });
+    if (queueCandidates.length) {
+      const billed = await getRenewalBilledCounts(
+        queueCandidates.map((d: any) => String(d.id))
+      ).catch(() => new Map<string, number>());
+      for (const d of queueCandidates) {
+        const name = d.properties?.dealname ?? "";
+        const company = extractCompany(name);
+        const yr = extractYearFromName(name);
+        entries.push({
+          currentDealId: `billing-queue:${d.id}`,
+          currentDealName: name,
+          company,
+          hasExtension: false,
+          msiYear: yr,
+          nextMsiYear: yr,
+          orderFormLicense: null,
+          currentYearLicense: null,
+          csaCount: null,
+          csaRounded: null,
+          renewalCount: billed.get(String(d.id)) ?? null,
+          renewalDealId: String(d.id),
+          renewalDealName: name,
+          renewalStartDate,
+          expirationDate,
+          m1NoteHtml: null,
+          m1NoteId: null,
+          nocInstanceId: null,
+          csaInstanceName: null,
+          sheetNote: null,
+          needsReview: true,
+          needsReviewReason:
+            "In the HubSpot billing queue for this cycle but missed by the normal matching — verify it belongs on this month's list.",
+          platform: "MSI",
+          extensionNames: [],
+          processed: true,
+          cancelled: false,
+          multiTenant: false,
+          billingQueueOnly: true,
+        });
+      }
     }
 
     entries.sort((a, b) => a.company.localeCompare(b.company));

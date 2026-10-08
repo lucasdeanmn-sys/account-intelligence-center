@@ -145,6 +145,16 @@ export interface RenewalEntry {
    *  instance ID (e.g. a sub-tenant). The displayed circuit count is already the
    *  sum, but the entry is flagged so you can double-check the breakdown. */
   multiTenant?: boolean;
+  /** CSA account status for this company (Production / Staging / Disabled). */
+  csaStatus?: string | null;
+  /** True when CSA shows the account Disabled (churned) yet it isn't already
+   *  marked cancelled — i.e. it would otherwise be billed. Surfaced so a
+   *  termination isn't missed before the renewal email goes out. */
+  terminationRisk?: boolean;
+  /** True for a row recovered from the HubSpot billing queue (a renewal deal in
+   *  a billing stage for this cycle that the normal date/CSA matching missed).
+   *  Joan: "it's in the Hubspot billing que but not on this list." */
+  billingQueueOnly?: boolean;
   /** Set when the signed M1 order form / note disagrees with what NOCAdmin
    *  (CSA snapshot) currently has — either the billing-cycle month or the
    *  contracted license count. Surfaces an "Update NOCAdmin" flag so the
