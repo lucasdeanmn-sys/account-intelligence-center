@@ -892,6 +892,46 @@ export async function getRenewalBilledCounts(
   return out;
 }
 
+// Richer sibling of getRenewalBilledCounts: for each renewal deal, return both
+// the billed MSI quantity AND the extension names actually on the deal (e.g.
+// "MSI Extension - POM (10k-50k)" → "POM"). Lets the email reflect what the deal
+// really bills, instead of the active-extension index — which drops an extension
+// the moment its standalone deal is terminated, even though it's now a line item
+// on the renewal (Nuvera's POM did exactly this).
+export async function getRenewalDealInfo(
+  dealIds: string[]
+): Promise<Map<string, { billedQty: number | null; extensions: string[] }>> {
+  const out = new Map<string, { billedQty: number | null; extensions: string[] }>();
+  const ids = dealIds.filter(Boolean);
+  if (!ids.length) return out;
+  const assoc = await batchReadAssociations("deals", "line_items", ids);
+  const allLiIds = Array.from(new Set(Array.from(assoc.values()).flat()));
+  const liList = await batchRead("line_items", allLiIds, ["name", "quantity"]).catch(() => []);
+  const liById = new Map<string, any>(liList.map((l: any) => [String(l.id), l]));
+  for (const dealId of ids) {
+    const items = (assoc.get(dealId) ?? []).map((id) => liById.get(id)).filter(Boolean);
+    if (!items.length) continue;
+    const base = items.find(
+      (l: any) =>
+        /^MSI\b/i.test(l.properties?.name ?? "") && !/extension/i.test(l.properties?.name ?? "")
+    );
+    const billedQty = base
+      ? Number(base.properties?.quantity)
+      : Math.max(0, ...items.map((l: any) => Number(l.properties?.quantity) || 0));
+    const extensions = items
+      .filter((l: any) => /extension/i.test(l.properties?.name ?? ""))
+      .map((l: any) =>
+        (l.properties?.name ?? "")
+          .replace(/^\s*MSI\s+Extension\s*[-–—]?\s*/i, "")
+          .replace(/\s*\([^)]*\)\s*$/, "")
+          .trim()
+      )
+      .filter(Boolean);
+    out.set(dealId, { billedQty: billedQty > 0 ? billedQty : null, extensions });
+  }
+  return out;
+}
+
 export async function updateNoteBody(noteId: string, htmlBody: string) {
   return hs("PATCH", `/crm/v3/objects/notes/${noteId}`, {
     properties: { hs_note_body: htmlBody },

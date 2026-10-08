@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { RenewalEntry } from "@/lib/types";
-import { getRenewalBilledCounts } from "@/lib/hubspot";
+import { getRenewalDealInfo } from "@/lib/hubspot";
 
 export const maxDuration = 30;
 
@@ -29,21 +29,22 @@ export async function POST(req: NextRequest) {
 
     const renewals = [...deals].sort((a, b) => a.company.localeCompare(b.company));
 
-    // Report the quantity actually on the renewal deal in HubSpot (what gets
-    // invoiced), not the report's pre-process figure — these can drift (Fiber
-    // Connect: line item 1,600, emailed figure 1,000). For any renewal deal
-    // that exists, the line-item quantity wins; otherwise fall back to the
-    // report's renewalCount.
+    // Pull the quantity AND extensions straight off the renewal deal in HubSpot
+    // (what gets invoiced), not the report's pre-process figures — these drift:
+    //   - count: Fiber Connect line item 1,600 but emailed 1,000.
+    //   - extensions: the active-extension index drops an extension the moment
+    //     its standalone deal is terminated, even though it's now a line item on
+    //     the renewal (Nuvera's POM). The deal's own line items are the truth.
     const renewalDealIds = renewals
       .map((d) => d.renewalDealId)
       .filter((id): id is string => !!id);
-    const billedByDeal = await getRenewalBilledCounts(renewalDealIds).catch(
-      () => new Map<string, number>()
+    const infoByDeal = await getRenewalDealInfo(renewalDealIds).catch(
+      () => new Map<string, { billedQty: number | null; extensions: string[] }>()
     );
 
     const formatLine = (d: RenewalEntry): string => {
-      const actual = d.renewalDealId ? billedByDeal.get(d.renewalDealId) : undefined;
-      const count = (actual ?? d.renewalCount)?.toLocaleString() ?? "TBD";
+      const info = d.renewalDealId ? infoByDeal.get(d.renewalDealId) : undefined;
+      const count = (info?.billedQty ?? d.renewalCount)?.toLocaleString() ?? "TBD";
       if (isNoc360) {
         // NOC360 lines are plain company + count — no M1 note/extension context.
         return `• ${d.company} — ${count}`;
@@ -52,10 +53,15 @@ export async function POST(req: NextRequest) {
       const note = d.sheetNote
         ? d.sheetNote.replace(/\s+on existing M1 agreement$/i, "")
         : null;
+      // Extensions from the deal's line items; fall back to the report's list.
+      const extensions =
+        info?.extensions && info.extensions.length > 0
+          ? info.extensions
+          : d.extensionNames ?? [];
       // Combine note + extension names into a single parenthetical so the line
       // stays on one row — Gmail strips leading-space indentation when converting
       // plain text to HTML, making separate sub-bullet lines merge into the main.
-      const parts = [note, ...(d.extensionNames ?? [])].filter(Boolean);
+      const parts = [note, ...extensions].filter(Boolean);
       const notePart = parts.length > 0 ? ` (${parts.join(", ")})` : "";
       return `• ${d.company} — ${count}${notePart}`;
     };
