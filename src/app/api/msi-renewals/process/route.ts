@@ -19,6 +19,7 @@ import {
   associateNoteWithDeal,
   MSI_PIPELINE_ID,
   MSI_STAGE_READY,
+  MSI_STAGE_INVOICED,
 } from "@/lib/hubspot";
 import { appendRenewalRow } from "@/lib/sheets";
 import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
@@ -106,6 +107,45 @@ export async function POST(req: NextRequest) {
         1
       ).catch(() => []);
       if (existing.length > 0) renewalDealId = existing[0].id;
+    }
+
+    // Re-processing guard for MSI: after a reload the row can carry no
+    // renewalDealId (an unmatched-CSA row, or a cycle-shifted company the
+    // matcher couldn't link to its expiring deal). Creating unconditionally
+    // then spawns a NEW incremented-year deal on every click — Dumont got
+    // Year 8, 9 AND 10 that way, all dated to the same renewal start. Before
+    // creating, reuse any renewal already staged for this company at this exact
+    // start date, regardless of its year label (there must be only one).
+    if (!renewalDealId && !isNoc360 && company && renewalStartDate) {
+      const startMs = new Date(renewalStartDate + "T00:00:00.000Z").getTime().toString();
+      const endMs = new Date(renewalStartDate + "T23:59:59.999Z").getTime().toString();
+      const token =
+        String(company).trim().split(/\s+/).find((w: string) => w.length > 2) ??
+        String(company).trim();
+      const candidates = await searchDeals(
+        [
+          { propertyName: "pipeline", operator: "EQ", value: MSI_PIPELINE_ID },
+          { propertyName: "subscription_start_date", operator: "GTE", value: startMs },
+          { propertyName: "subscription_start_date", operator: "LTE", value: endMs },
+          { propertyName: "dealstage", operator: "IN", values: [MSI_STAGE_READY, MSI_STAGE_INVOICED] },
+          { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: token },
+        ],
+        ["dealname", "subscription_start_date"],
+        10
+      ).catch(() => [] as any[]);
+      const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const want = norm(String(company));
+      const match = candidates.find((d: any) => {
+        const base = (d.properties?.dealname ?? "").replace(/\s*\(MSI[\s\S]*$/i, "");
+        const nm = norm(base);
+        return nm.length > 0 && (nm.includes(want) || want.includes(nm));
+      });
+      if (match) {
+        renewalDealId = match.id;
+        console.log(
+          `[idempotency] reusing existing renewal ${match.id} (${match.properties?.dealname}) for "${company}" @ ${renewalStartDate} instead of creating a duplicate`
+        );
+      }
     }
 
     if (!renewalDealId) {

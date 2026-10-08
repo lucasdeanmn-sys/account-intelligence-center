@@ -1224,16 +1224,30 @@ export async function GET(req: NextRequest) {
       if (d.properties?.dealstage !== MSI_STAGE_READY) return false;
       if (representedRenewalIds.has(String(d.id))) return false;
       const co = extractCompany(name);
-      return !entries.some((e) => companyNamesMatch(e.company, co));
+      // Ignore unmatched-CSA stubs here: they carry no real deal, so a stub for
+      // the same company (e.g. CSA "Dumont Telephone Co" vs deal "Dumont") must
+      // NOT mask a genuine Ready-for-Billing renewal — otherwise the real deal
+      // never surfaces and drops out of the email.
+      return !entries.some((e) => !e.unmatchedCsa && companyNamesMatch(e.company, co));
     });
     if (queueCandidates.length) {
       const billed = await getRenewalBilledCounts(
         queueCandidates.map((d: any) => String(d.id))
       ).catch(() => new Map<string, number>());
+      const supersededStubIds = new Set<string>();
       for (const d of queueCandidates) {
         const name = d.properties?.dealname ?? "";
         const company = extractCompany(name);
         const yr = extractYearFromName(name);
+        // A recovered deal supersedes any unmatched-CSA stub for the same
+        // company — carry the stub's CSA context onto the real row and drop it.
+        const stub = entries.find(
+          (e) =>
+            e.unmatchedCsa &&
+            (companyNamesMatch(e.company, company) ||
+              (e.csaInstanceName ? companyNamesMatch(e.csaInstanceName, company) : false))
+        );
+        if (stub) supersededStubIds.add(stub.currentDealId);
         entries.push({
           currentDealId: `billing-queue:${d.id}`,
           currentDealName: name,
@@ -1243,17 +1257,17 @@ export async function GET(req: NextRequest) {
           nextMsiYear: yr,
           orderFormLicense: null,
           currentYearLicense: null,
-          csaCount: null,
-          csaRounded: null,
-          renewalCount: billed.get(String(d.id)) ?? null,
+          csaCount: stub?.csaCount ?? null,
+          csaRounded: stub?.csaRounded ?? null,
+          renewalCount: billed.get(String(d.id)) ?? stub?.csaRounded ?? null,
           renewalDealId: String(d.id),
           renewalDealName: name,
           renewalStartDate,
           expirationDate,
           m1NoteHtml: null,
           m1NoteId: null,
-          nocInstanceId: null,
-          csaInstanceName: null,
+          nocInstanceId: stub?.nocInstanceId ?? null,
+          csaInstanceName: stub?.csaInstanceName ?? null,
           sheetNote: null,
           needsReview: true,
           needsReviewReason:
@@ -1265,6 +1279,12 @@ export async function GET(req: NextRequest) {
           multiTenant: false,
           billingQueueOnly: true,
         });
+      }
+      // Remove the superseded unmatched-CSA stubs now that the real deals are in.
+      if (supersededStubIds.size) {
+        for (let i = entries.length - 1; i >= 0; i--) {
+          if (supersededStubIds.has(entries[i].currentDealId)) entries.splice(i, 1);
+        }
       }
     }
 
