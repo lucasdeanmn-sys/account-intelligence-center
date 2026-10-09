@@ -1271,12 +1271,24 @@ const MSI_PRODUCT_TIERS: { max: number; id: string; name: string }[] = [
   { max: 4_000_000, id: "2086400317", name: "MSI (2M-4M)"      },
 ];
 
+// A count sitting exactly on a tier boundary (2,500 / 5,000 / 10,000 / …)
+// belongs to the HIGHER tier — e.g. 5,000 is the 5k-10k tier, not 2.5k-5k.
+// `<=` matched the lower tier first, so Carthage at 5,000 got the 2.5k-5k product
+// ($1.87) instead of 5k-10k ($1.62). Match `< max`; the top tier is the catch-all
+// for anything at or above the final boundary.
+function msiTierForCount(renewalCount: number) {
+  return (
+    MSI_PRODUCT_TIERS.find((t) => renewalCount < t.max) ??
+    MSI_PRODUCT_TIERS[MSI_PRODUCT_TIERS.length - 1]
+  );
+}
+
 function getMsiProductId(renewalCount: number): string | null {
-  return MSI_PRODUCT_TIERS.find((t) => renewalCount <= t.max)?.id ?? null;
+  return msiTierForCount(renewalCount)?.id ?? null;
 }
 
 function getMsiProductName(renewalCount: number): string {
-  return MSI_PRODUCT_TIERS.find((t) => renewalCount <= t.max)?.name ?? "MSI License";
+  return msiTierForCount(renewalCount)?.name ?? "MSI License";
 }
 
 // Clone all line items from sourceDealId to targetDealId.
@@ -1629,7 +1641,8 @@ const NOC360_PRODUCT_TIERS: { max: number; id: string; name: string; price: stri
 ];
 
 export function noc360ProductForCount(count: number) {
-  return NOC360_PRODUCT_TIERS.find((t) => count <= t.max) ?? NOC360_PRODUCT_TIERS[NOC360_PRODUCT_TIERS.length - 1];
+  // Boundary counts belong to the higher tier (same rule as MSI) — match `< max`.
+  return NOC360_PRODUCT_TIERS.find((t) => count < t.max) ?? NOC360_PRODUCT_TIERS[NOC360_PRODUCT_TIERS.length - 1];
 }
 
 // Contracted NOC360 per-sub rate from the company's original "(NOC360)"
