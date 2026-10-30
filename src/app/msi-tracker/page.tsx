@@ -13,7 +13,7 @@ import {
   Plus,
   RefreshCw,
 } from "lucide-react";
-import type { RenewalEntry } from "@/lib/types";
+import type { RenewalEntry, NetNewDeal } from "@/lib/types";
 import type { CsaInstance } from "@/lib/csa";
 
 interface CsaOverride {
@@ -788,6 +788,7 @@ export default function MSITrackerPage() {
   const [sheetWarning, setSheetWarning] = useState<string | null>(null);
   const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[]; deals: RenewalEntry[] } | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
+  const [netNew, setNetNew] = useState<NetNewDeal[]>([]);
   const [csaInstances, setCsaInstances] = useState<CsaInstance[]>([]);
   const [csaError, setCsaError] = useState<string | null>(null);
   const [csaOverrides, setCsaOverrides] = useState<Record<string, CsaOverride>>(() => {
@@ -981,6 +982,38 @@ export default function MSITrackerPage() {
       setError(e.message || "Failed to load renewal data");
     } finally {
       setLoading(false);
+    }
+
+    // Net-new / pending-billing is not month-scoped — fetch it alongside the
+    // report (non-blocking). Catches new-logo + standalone-extension deals that
+    // aren't renewals so they reach Joan without going to Adtran.
+    fetch("/api/msi-renewals/net-new")
+      .then((r) => (r.ok ? r.json() : { newLogos: [], standaloneExtensions: [] }))
+      .then((d) => setNetNew([...(d.newLogos ?? []), ...(d.standaloneExtensions ?? [])]))
+      .catch(() => setNetNew([]));
+  }
+
+  async function generateNetNewEmail() {
+    if (!netNew.length) return;
+    setEmailLoading(true);
+    try {
+      const label = expirationDate
+        ? new Date(expirationDate + "T00:00:00.000Z").toLocaleString("en-US", {
+            month: "long", year: "numeric", timeZone: "UTC",
+          })
+        : "Renewals";
+      const res = await fetch("/api/msi-renewals/email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ netNewDeals: netNew, monthLabel: label, platform: "NET_NEW" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setEmailModal({ ...data, deals: [] });
+    } catch (e: any) {
+      setError(e.message || "Failed to generate net-new email");
+    } finally {
+      setEmailLoading(false);
     }
   }
 
@@ -1326,6 +1359,60 @@ export default function MSITrackerPage() {
                 onCancel={(e) => setCancelEntry(e)}
                 onUnprocess={handleUnprocess}
               />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Net New — Pending Billing: deals that aren't renewals (new logos +
+          standalone extensions), surfaced so they reach Joan but NOT Adtran. */}
+      {netNew.length > 0 && (
+        <div className="mt-8">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-semibold text-white">
+              Net New — Pending Billing{" "}
+              <span className="font-normal" style={{ color: "#64748b" }}>
+                ({netNew.length})
+              </span>
+            </p>
+            <button
+              onClick={generateNetNewEmail}
+              disabled={emailLoading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
+              style={{ borderColor: "#252836", color: "#94a3b8" }}
+            >
+              {emailLoading ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />}
+              Generate Email (Joan)
+            </button>
+          </div>
+          <p className="text-xs mb-2" style={{ color: "#64748b" }}>
+            Not renewals — new logos and standalone extensions in Ready for Billing. Goes to Joan only, not the Adtran renewal list.
+          </p>
+          <div className="space-y-2">
+            {netNew.map((d) => (
+              <div key={d.dealId} className="rounded-xl border px-4 py-3 flex items-center justify-between gap-4"
+                style={{ backgroundColor: "#1a1d27", borderColor: "#252836" }}>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-semibold text-white truncate">{d.company}</p>
+                    <span className="shrink-0 text-xs px-1.5 py-0.5 rounded"
+                      style={{ backgroundColor: d.type === "new-logo" ? "#22c55e15" : "#6366f115", color: d.type === "new-logo" ? "#22c55e" : "#a5b4fc" }}>
+                      {d.type === "new-logo" ? "New Logo" : "Extension"}
+                    </span>
+                    <span className="shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f9731615", color: "#fb923c" }}>
+                      Moved to Ready for Billing{d.movedToBilling ? ` · ${d.movedToBilling}` : ""}
+                    </span>
+                  </div>
+                  <p className="text-xs mt-0.5 truncate" style={{ color: "#64748b" }}>
+                    {d.dealName}
+                    {d.termStart && ` · Term ${d.termStart}${d.termEnd ? `–${d.termEnd}` : ""}`}
+                  </p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-sm font-medium text-white">{d.license != null ? d.license.toLocaleString() : "—"}</p>
+                  <p className="text-xs" style={{ color: "#475569" }}>license</p>
+                </div>
+              </div>
             ))}
           </div>
         </div>

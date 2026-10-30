@@ -176,6 +176,26 @@ export interface RenewalEntry {
   } | null;
 }
 
+// A deal "pending billing" that is NOT a renewal — surfaced so it reaches Joan
+// (billing) without going into the Adtran renewal list. Two kinds:
+//   "new-logo"  — a company's first MSI term (no prior MSI deal), in Ready for Billing.
+//   "extension" — an extension deal closed-won on its own (Pending/Ready for Billing),
+//                 outside the normal MSI-renewal merge.
+export interface NetNewDeal {
+  dealId: string;
+  dealName: string;
+  company: string;
+  /** Line-item quantity (license count). */
+  license: number | null;
+  /** subscription_start_date, YYYY-MM-DD. */
+  termStart: string | null;
+  /** One year from termStart minus a day (the billable term end), YYYY-MM-DD. */
+  termEnd: string | null;
+  /** Date the deal entered its billing stage ("moved to Ready for Billing"), YYYY-MM-DD. */
+  movedToBilling: string | null;
+  type: "new-logo" | "extension";
+}
+
 export interface TaskCreate {
   dealId: string;
   subject: string;

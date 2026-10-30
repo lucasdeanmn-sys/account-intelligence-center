@@ -1,3 +1,5 @@
+import type { NetNewDeal } from "./types";
+
 const BASE = "https://api.hubapi.com";
 
 // Sentinel value stored in service_terminated when a renewal is marked
@@ -18,6 +20,8 @@ export const MSI_STAGE_READY          = "157830253";  // Closed Won - Ready for 
 export const MSI_STAGE_INVOICED       = "1072203278"; // Closed Won - Invoiced
 export const MSI_STAGE_DID_NOT_RENEW  = "1629134";   // Did Not Renew
 export const MSI_EXTENSION_PIPELINE_ID = "152877993"; // Extensions pipeline
+export const EXT_STAGE_PENDING_BILLING = "1188588632"; // Extensions: Closed Won - Pending Billing
+export const EXT_STAGE_READY           = "257753679";  // Extensions: Closed Won - Ready for Billing
 
 function token() {
   const t = process.env.HUBSPOT_ACCESS_TOKEN;
@@ -938,6 +942,156 @@ export async function getRenewalDealInfo(
     out.set(dealId, { billedQty: billedQty > 0 ? billedQty : null, extensions });
   }
   return out;
+}
+
+// ─── Net-new "pending billing" detection ──────────────────────────────────────
+// Catch billable deals that AREN'T renewals, so they reach Joan without landing
+// in the Adtran renewal list:
+//   • new-logo  — an MSI deal in Ready for Billing whose company has no prior MSI
+//     term (their first MSI deal).
+//   • extension — an extension deal closed-won on its own (Pending/Ready for
+//     Billing in the Extensions pipeline), i.e. not merged into an MSI renewal.
+// Not month-scoped: new business closes on its own schedule.
+
+// subscription_start_date / date-entered props come back either as a ms-epoch
+// string or an ISO/date string depending on the endpoint — normalize to YYYY-MM-DD.
+function toYmd(v: any): string | null {
+  if (v == null || v === "") return null;
+  const s = String(v);
+  if (/^\d+$/.test(s)) return new Date(Number(s)).toISOString().slice(0, 10);
+  const t = Date.parse(s);
+  return isNaN(t) ? s.slice(0, 10) : new Date(t).toISOString().slice(0, 10);
+}
+function toMs(v: any): number {
+  if (v == null || v === "") return 0;
+  const s = String(v);
+  if (/^\d+$/.test(s)) return Number(s);
+  const t = Date.parse(s);
+  return isNaN(t) ? 0 : t;
+}
+function oneYearTermEnd(ymd: string | null): string | null {
+  if (!ymd) return null;
+  const d = new Date(ymd + "T00:00:00.000Z");
+  d.setUTCFullYear(d.getUTCFullYear() + 1);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+function companyFromDealName(dealName: string): string {
+  const i = dealName.indexOf(" (MSI");
+  if (i > 0) return dealName.slice(0, i).trim();
+  const j = dealName.indexOf(" (");
+  return j > 0 ? dealName.slice(0, j).trim() : dealName.trim();
+}
+
+export async function getNetNewPendingBilling(): Promise<{
+  newLogos: NetNewDeal[];
+  standaloneExtensions: NetNewDeal[];
+}> {
+  // 1. MSI base deals currently in Ready for Billing.
+  const rfb = await searchDeals(
+    [
+      { propertyName: "pipeline", operator: "EQ", value: MSI_PIPELINE_ID },
+      { propertyName: "dealstage", operator: "EQ", value: MSI_STAGE_READY },
+      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+    ],
+    ["dealname", "subscription_start_date", "createdate", `hs_date_entered_${MSI_STAGE_READY}`],
+    200
+  ).catch(() => [] as any[]);
+  const baseRfb = rfb.filter((d: any) => !/extension/i.test(d.properties?.dealname ?? ""));
+
+  let newLogos: NetNewDeal[] = [];
+  if (baseRfb.length) {
+    const companyMap = await getDealCompanyMap(baseRfb.map((d: any) => d.id));
+    const companyIds = Array.from(
+      new Set(baseRfb.flatMap((d: any) => companyMap.get(d.id) ?? []))
+    );
+    const companyDeals = companyIds.length
+      ? await batchReadAssociations("companies", "deals", companyIds)
+      : new Map<string, string[]>();
+    const relatedIds = Array.from(new Set(Array.from(companyDeals.values()).flat()));
+    const related = await batchRead("deals", relatedIds, [
+      "dealname",
+      "subscription_start_date",
+      "pipeline",
+    ]).catch(() => [] as any[]);
+    const relById = new Map<string, any>(related.map((d: any) => [String(d.id), d.properties]));
+    const info = await getRenewalDealInfo(baseRfb.map((d: any) => d.id)).catch(
+      () => new Map<string, RenewalDealInfo>()
+    );
+
+    for (const d of baseRfb) {
+      const thisMs = toMs(d.properties?.subscription_start_date);
+      // A prior MSI term for this company (earlier start date) ⇒ renewal, not net-new.
+      const cids = companyMap.get(d.id) ?? [];
+      const hasPrior = cids.some((cid) =>
+        (companyDeals.get(cid) ?? []).some((otherId) => {
+          if (String(otherId) === String(d.id)) return false;
+          const op = relById.get(String(otherId));
+          if (!op || op.pipeline !== MSI_PIPELINE_ID) return false;
+          if (/extension/i.test(op.dealname ?? "")) return false;
+          const oMs = toMs(op.subscription_start_date);
+          return oMs > 0 && oMs < thisMs;
+        })
+      );
+      if (hasPrior) continue;
+      const termStart = toYmd(d.properties?.subscription_start_date);
+      newLogos.push({
+        dealId: String(d.id),
+        dealName: d.properties?.dealname ?? "",
+        company: companyFromDealName(d.properties?.dealname ?? ""),
+        license: info.get(d.id)?.billedQty ?? null,
+        termStart,
+        termEnd: oneYearTermEnd(termStart),
+        movedToBilling:
+          toYmd(d.properties?.[`hs_date_entered_${MSI_STAGE_READY}`]) ??
+          toYmd(d.properties?.createdate),
+        type: "new-logo",
+      });
+    }
+  }
+
+  // 2. Standalone extensions closed-won on their own (not merged into an MSI deal).
+  const extDeals = await searchDeals(
+    [
+      { propertyName: "pipeline", operator: "EQ", value: MSI_EXTENSION_PIPELINE_ID },
+      {
+        propertyName: "dealstage",
+        operator: "IN",
+        values: [EXT_STAGE_PENDING_BILLING, EXT_STAGE_READY],
+      },
+    ],
+    [
+      "dealname",
+      "subscription_start_date",
+      "dealstage",
+      "createdate",
+      `hs_date_entered_${EXT_STAGE_PENDING_BILLING}`,
+      `hs_date_entered_${EXT_STAGE_READY}`,
+    ],
+    200
+  ).catch(() => [] as any[]);
+  const extInfo = await getRenewalDealInfo(extDeals.map((d: any) => d.id)).catch(
+    () => new Map<string, RenewalDealInfo>()
+  );
+  const standaloneExtensions: NetNewDeal[] = extDeals.map((d: any) => {
+    const termStart = toYmd(d.properties?.subscription_start_date);
+    const moved =
+      d.properties?.[`hs_date_entered_${EXT_STAGE_PENDING_BILLING}`] ??
+      d.properties?.[`hs_date_entered_${EXT_STAGE_READY}`] ??
+      d.properties?.createdate;
+    return {
+      dealId: String(d.id),
+      dealName: d.properties?.dealname ?? "",
+      company: companyFromDealName(d.properties?.dealname ?? ""),
+      license: extInfo.get(d.id)?.billedQty ?? null,
+      termStart,
+      termEnd: oneYearTermEnd(termStart),
+      movedToBilling: toYmd(moved),
+      type: "extension" as const,
+    };
+  });
+
+  return { newLogos, standaloneExtensions };
 }
 
 export async function updateNoteBody(noteId: string, htmlBody: string) {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { RenewalEntry } from "@/lib/types";
+import type { RenewalEntry, NetNewDeal } from "@/lib/types";
 import { getRenewalDealInfo } from "@/lib/hubspot";
 import type { RenewalDealInfo } from "@/lib/hubspot";
 
@@ -12,17 +12,54 @@ const RECIPIENTS = [
   "jtermaat@7sigma.com",
 ];
 
-// NOC360 renewals are internal — they go only to Joan.
+// NOC360 renewals and net-new/pending-billing are internal — Joan only.
 const RECIPIENTS_NOC360 = ["jtermaat@7sigma.com"];
+const RECIPIENTS_NET_NEW = ["jtermaat@7sigma.com"];
 
 export async function POST(req: NextRequest) {
   try {
-    const { deals, monthLabel, platform } = await req.json() as {
-      deals: RenewalEntry[];
+    const reqBody = await req.json() as {
+      deals?: RenewalEntry[];
+      netNewDeals?: NetNewDeal[];
       monthLabel: string;
-      platform?: "MSI" | "NOC360";
+      platform?: "MSI" | "NOC360" | "NET_NEW";
     };
+    const { deals, monthLabel, platform } = reqBody;
     const isNoc360 = platform === "NOC360";
+
+    // ── Net-new / pending-billing email (Joan only) ──────────────────────────
+    // Deals that aren't renewals, so they never go to Adtran. Each line shows
+    // the license count and term, flagged "Moved to Ready for Billing".
+    if (platform === "NET_NEW") {
+      const netNew = reqBody.netNewDeals ?? [];
+      if (!netNew.length) {
+        return NextResponse.json({ error: "netNewDeals array required" }, { status: 400 });
+      }
+      const fmtTerm = (d: NetNewDeal) =>
+        d.termStart ? `${d.termStart}${d.termEnd ? ` – ${d.termEnd}` : ""}` : "term TBD";
+      const line = (d: NetNewDeal) => {
+        const lic = d.license != null ? d.license.toLocaleString() : "TBD";
+        const kind = d.type === "new-logo" ? "New Logo" : "Extension";
+        return `• ${d.company} — ${lic} (${kind}; term ${fmtTerm(d)}; moved to Ready for Billing${d.movedToBilling ? ` ${d.movedToBilling}` : ""})`;
+      };
+      const sorted = [...netNew].sort(
+        (a, b) => a.type.localeCompare(b.type) || a.company.localeCompare(b.company)
+      );
+      const subject = `MSI ${monthLabel} — Net New / Pending Billing`;
+      const nnBody = [
+        `Hi Joan,`,
+        ``,
+        `The following are net new / pending billing (not renewals, so they're not on the Adtran renewal list) and have moved to Ready for Billing:`,
+        ``,
+        ...sorted.map(line),
+        ``,
+        `Please invoice these accordingly. Let me know if you have any questions.`,
+        ``,
+        `Thanks,`,
+        `Luke`,
+      ].join("\n");
+      return NextResponse.json({ subject, body: nnBody, to: RECIPIENTS_NET_NEW });
+    }
 
     if (!deals?.length) {
       return NextResponse.json({ error: "deals array required" }, { status: 400 });
