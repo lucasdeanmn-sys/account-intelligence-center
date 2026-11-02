@@ -22,6 +22,12 @@ export const MSI_STAGE_DID_NOT_RENEW  = "1629134";   // Did Not Renew
 export const MSI_EXTENSION_PIPELINE_ID = "152877993"; // Extensions pipeline
 export const EXT_STAGE_PENDING_BILLING = "1188588632"; // Extensions: Closed Won - Pending Billing
 export const EXT_STAGE_READY           = "257753679";  // Extensions: Closed Won - Ready for Billing
+// "Access" pipeline — where a new customer's FIRST-term (Year 1) deal is sold.
+// Renewals (Year 2+) move to the MSI renewals pipeline (984885); a genuine new
+// logo pending billing lives here in a billing stage, not in 984885.
+export const NETNEW_PIPELINE_ID         = "572784";
+export const NETNEW_STAGE_PENDING_BILLING = "1141342330"; // Access: Closed Won - Pending Billing
+export const NETNEW_STAGE_READY           = "125439091";  // Access: Closed Won - Ready for Billing
 
 function token() {
   const t = process.env.HUBSPOT_ACCESS_TOKEN;
@@ -987,17 +993,47 @@ export async function getNetNewPendingBilling(): Promise<{
   newLogos: NetNewDeal[];
   standaloneExtensions: NetNewDeal[];
 }> {
-  // 1. MSI base deals currently in Ready for Billing.
-  const rfb = await searchDeals(
-    [
-      { propertyName: "pipeline", operator: "EQ", value: MSI_PIPELINE_ID },
-      { propertyName: "dealstage", operator: "EQ", value: MSI_STAGE_READY },
-      { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
-    ],
-    ["dealname", "subscription_start_date", "createdate", `hs_date_entered_${MSI_STAGE_READY}`],
-    200
-  ).catch(() => [] as any[]);
-  const baseRfb = rfb.filter((d: any) => !/extension/i.test(d.properties?.dealname ?? ""));
+  // 1. MSI base deals sitting in a billing stage. A genuine new logo's first
+  //    term is sold in the Access pipeline (572784) and only moves to the MSI
+  //    renewals pipeline (984885) at Year 2 — so scan BOTH: the Access pipeline's
+  //    Pending/Ready-for-Billing stages (where real new logos wait) and the MSI
+  //    pipeline's Ready-for-Billing (belt-and-suspenders; Year 2+ there is
+  //    excluded as a renewal in the loop below). Stage-entry dates differ per
+  //    pipeline, so request every billing stage's hs_date_entered_* and pick
+  //    whichever is set for movedToBilling.
+  const BILLING_STAGE_ENTERED_PROPS = [
+    `hs_date_entered_${NETNEW_STAGE_PENDING_BILLING}`,
+    `hs_date_entered_${NETNEW_STAGE_READY}`,
+    `hs_date_entered_${MSI_STAGE_READY}`,
+  ];
+  const baseProps = ["dealname", "subscription_start_date", "createdate", ...BILLING_STAGE_ENTERED_PROPS];
+  const [accessRfb, msiRfb] = await Promise.all([
+    searchDeals(
+      [
+        { propertyName: "pipeline", operator: "EQ", value: NETNEW_PIPELINE_ID },
+        { propertyName: "dealstage", operator: "IN", values: [NETNEW_STAGE_PENDING_BILLING, NETNEW_STAGE_READY] },
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+      ],
+      baseProps,
+      200
+    ).catch(() => [] as any[]),
+    searchDeals(
+      [
+        { propertyName: "pipeline", operator: "EQ", value: MSI_PIPELINE_ID },
+        { propertyName: "dealstage", operator: "EQ", value: MSI_STAGE_READY },
+        { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: "MSI" },
+      ],
+      baseProps,
+      200
+    ).catch(() => [] as any[]),
+  ]);
+  // Merge + dedup by deal id, dropping extension deals (handled in step 2).
+  const byId = new Map<string, any>();
+  for (const d of [...accessRfb, ...msiRfb]) {
+    if (/extension/i.test(d.properties?.dealname ?? "")) continue;
+    if (!byId.has(String(d.id))) byId.set(String(d.id), d);
+  }
+  const baseRfb = Array.from(byId.values());
 
   let newLogos: NetNewDeal[] = [];
   if (baseRfb.length) {
@@ -1021,14 +1057,26 @@ export async function getNetNewPendingBilling(): Promise<{
 
     for (const d of baseRfb) {
       const thisMs = toMs(d.properties?.subscription_start_date);
-      // A prior MSI term for this company (earlier start date) ⇒ renewal, not net-new.
+      const dealName = d.properties?.dealname ?? "";
+      // A deal explicitly labeled "Year 2" (or higher) is a RENEWAL, never a new
+      // logo — full stop. The customer's first-term ("Year 1") deal lives in the
+      // net-new/sales pipeline (572784), not the MSI renewals pipeline this search
+      // scans, and it frequently carries no subscription_start_date, so the
+      // prior-term check below can't see it. Trust the explicit year label first.
+      const yearNum = (() => {
+        const m = dealName.match(/Year\s*[-–—]?\s*(\d+)/i);
+        return m ? parseInt(m[1], 10) : null;
+      })();
+      if (yearNum != null && yearNum >= 2) continue;
+      // Backstop: any earlier-dated MSI term for this company (in ANY pipeline,
+      // not just MSI renewals) ⇒ renewal, not net-new.
       const cids = companyMap.get(d.id) ?? [];
       const hasPrior = cids.some((cid) =>
         (companyDeals.get(cid) ?? []).some((otherId) => {
           if (String(otherId) === String(d.id)) return false;
           const op = relById.get(String(otherId));
-          if (!op || op.pipeline !== MSI_PIPELINE_ID) return false;
-          if (/extension/i.test(op.dealname ?? "")) return false;
+          const onm = op?.dealname ?? "";
+          if (!op || !/MSI/i.test(onm) || /extension/i.test(onm)) return false;
           const oMs = toMs(op.subscription_start_date);
           return oMs > 0 && oMs < thisMs;
         })
@@ -1043,8 +1091,9 @@ export async function getNetNewPendingBilling(): Promise<{
         termStart,
         termEnd: oneYearTermEnd(termStart),
         movedToBilling:
-          toYmd(d.properties?.[`hs_date_entered_${MSI_STAGE_READY}`]) ??
-          toYmd(d.properties?.createdate),
+          toYmd(
+            BILLING_STAGE_ENTERED_PROPS.map((p) => d.properties?.[p]).find(Boolean)
+          ) ?? toYmd(d.properties?.createdate),
         type: "new-logo",
       });
     }
