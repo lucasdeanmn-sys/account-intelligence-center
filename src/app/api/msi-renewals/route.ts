@@ -9,6 +9,13 @@ import { decodeNoteEntities, extractItalicYearEntries, extractNonItalicYearEntri
 export const maxDuration = 90;
 export const dynamic = "force-dynamic";
 
+// NOC360 accounts whose CSA license_count is a REAL committed floor — their
+// renewal holds at the license even when rounded usage is lower (default NOC360
+// bills usage; see the renewalCount note in the NOC360 loop). Keys are the CSA
+// instanceName, lowercased + trimmed. Opt-in per account; add a name here only
+// when the license is the contracted minimum, not a stale/high reading.
+const NOC360_LICENSE_FLOOR = new Set<string>(["norvado"]);
+
 // Normalize a company name for fuzzy matching: lowercase, strip punctuation/spaces.
 // "Fiber Connect" → "fiberconnect", "La Ward Telephone" → "lawardtelephone"
 function normName(s: string): string {
@@ -1224,7 +1231,18 @@ export async function GET(req: NextRequest) {
       // PVT's 7,450 predates its DSL churn), so flooring on it over-bills. The
       // license is surfaced for reference (Order Form column) only. Fall back to
       // it solely when there's no usage figure at all.
-      const renewalCount = csaRounded ?? lic ?? null;
+      //
+      // EXCEPTION — NOC360_LICENSE_FLOOR: a few accounts have a real committed
+      // license that IS the floor, so their renewal must never drop below it even
+      // when rounded usage is lower (Norvado: 20,000 committed vs ~15,550 usage).
+      // Opt-in per account, because most license_counts can't be trusted (above).
+      const floorsOnLicense = NOC360_LICENSE_FLOOR.has(
+        inst.instanceName.trim().toLowerCase()
+      );
+      const renewalCount =
+        floorsOnLicense && lic != null
+          ? Math.max(csaRounded ?? 0, lic)
+          : csaRounded ?? lic ?? null;
       const noc360DealName = `${inst.instanceName} (NOC360 Renewal - ${renewalYear})`;
       const existingDeal = existingNoc360Deals.find(
         (d) => d.properties?.dealname === noc360DealName
