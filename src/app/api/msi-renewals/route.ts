@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, searchDeals, getDealsByIds, getDealNotesBatch, getDealCompanyMap, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, getRenewalBilledCounts, normExtCo, CANCEL_SENTINEL, MSI_STAGE_READY, MSI_STAGE_DID_NOT_RENEW } from "@/lib/hubspot";
+import { getMsiDealsByStartDate, getMsiDealsByStartMonth, getMsiDealsByCompanyInstanceId, searchMsiDealsByCompanyName, searchDeals, getDealsByIds, getDealNotesBatch, getDealCompanyMap, getDealCompanyNocIds, getActiveExtensionCompanies, getProcessedStageIds, getRenewalBilledCounts, normExtCo, CANCEL_SENTINEL, MSI_STAGE_READY, MSI_STAGE_DID_NOT_RENEW, MSI_STAGE_VERBAL_BOOKING } from "@/lib/hubspot";
 import type { ExtensionIndex } from "@/lib/hubspot";
 import { fetchCsaForMonth } from "@/lib/csa";
 import type { CsaInstance } from "@/lib/csa";
@@ -501,6 +501,10 @@ export async function GET(req: NextRequest) {
           // those through — their first deal starts on renewalStartDate.
           const msiDeals = res.value.filter((d: any) => {
             const name = d.properties?.dealname ?? "";
+            // A Verbal-Booking deal is a FUTURE pre-sale of the next term, never
+            // the current expiring year — excluding it stops the year counter
+            // from being inflated by one (which spawned a duplicate: New Hope AL).
+            if (d.properties?.dealstage === MSI_STAGE_VERBAL_BOOKING) return false;
             return name.includes("MSI") && !/extension/i.test(name);
           });
           const nonRenewalCandidates = msiDeals.filter((d: any) => {
@@ -567,6 +571,8 @@ export async function GET(req: NextRequest) {
             // First, filter to name-matching non-extension deals (no date constraint yet).
             const allMatches = res.value.filter((d: any) => {
               if (/extension/i.test(d.properties?.dealname ?? "")) return false;
+              // Verbal Booking = future pre-sale, never the current year (see Tier 2).
+              if (d.properties?.dealstage === MSI_STAGE_VERBAL_BOOKING) return false;
               const co = extractCompany(d.properties?.dealname ?? "");
               return companyNamesMatch(co, inst.instanceName);
             });
@@ -657,6 +663,8 @@ export async function GET(req: NextRequest) {
         if (seenIds.has(d.id)) continue;
         const name = d.properties?.dealname ?? "";
         if (!name.includes("MSI") || /extension/i.test(name)) continue;
+        // Verbal Booking = future pre-sale, never the current year (see Tier 2).
+        if (d.properties?.dealstage === MSI_STAGE_VERBAL_BOOKING) continue;
         // Skip non-annual MSI deals (e.g. "United (MSI Enable/Disable)") — require "Year N"
         if (!/\bYear\b/i.test(name)) continue;
         const co = normName(extractCompany(name));

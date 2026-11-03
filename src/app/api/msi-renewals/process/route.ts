@@ -20,6 +20,7 @@ import {
   MSI_PIPELINE_ID,
   MSI_STAGE_READY,
   MSI_STAGE_INVOICED,
+  MSI_STAGE_VERBAL_BOOKING,
 } from "@/lib/hubspot";
 import { appendRenewalRow } from "@/lib/sheets";
 import { HUBSPOT_OWNER_ID } from "@/lib/anthropic";
@@ -127,7 +128,12 @@ export async function POST(req: NextRequest) {
           { propertyName: "pipeline", operator: "EQ", value: MSI_PIPELINE_ID },
           { propertyName: "subscription_start_date", operator: "GTE", value: startMs },
           { propertyName: "subscription_start_date", operator: "LTE", value: endMs },
-          { propertyName: "dealstage", operator: "IN", values: [MSI_STAGE_READY, MSI_STAGE_INVOICED] },
+          // Verbal Booking included: an account may pre-book the next term as a
+          // Verbal-Booking deal (often an old order form at a stale count). That
+          // deal IS this renewal — advance it (dealUpdates below move it to Ready
+          // for Billing and reset the count) rather than spawn a higher-year
+          // duplicate for the same start date (New Hope AL hit this).
+          { propertyName: "dealstage", operator: "IN", values: [MSI_STAGE_READY, MSI_STAGE_INVOICED, MSI_STAGE_VERBAL_BOOKING] },
           { propertyName: "dealname", operator: "CONTAINS_TOKEN", value: token },
         ],
         ["dealname", "subscription_start_date"],
