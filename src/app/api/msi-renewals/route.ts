@@ -9,12 +9,13 @@ import { decodeNoteEntities, extractItalicYearEntries, extractNonItalicYearEntri
 export const maxDuration = 90;
 export const dynamic = "force-dynamic";
 
-// NOC360 accounts whose CSA license_count is a REAL committed floor — their
-// renewal holds at the license even when rounded usage is lower (default NOC360
-// bills usage; see the renewalCount note in the NOC360 loop). Keys are the CSA
-// instanceName, lowercased + trimmed. Opt-in per account; add a name here only
-// when the license is the contracted minimum, not a stale/high reading.
-const NOC360_LICENSE_FLOOR = new Set<string>(["norvado"]);
+// NOC360 renewal flags the license for review when it towers over actual usage
+// (≥ this multiple of rounded usage) — a possibly stale/high license_count that
+// would over-bill if used as the floor. Below it, the license is trusted as the
+// committed floor. 2× catches the egregious case the old usage-only rule feared
+// (Premier once read 84k vs ~28k usage) while letting normal committed floors
+// through (Norvado's 20k vs ~15.5k usage is 1.29×).
+const NOC360_LICENSE_REVIEW_MULTIPLE = 2;
 
 // Normalize a company name for fuzzy matching: lowercase, strip punctuation/spaces.
 // "Fiber Connect" → "fiberconnect", "La Ward Telephone" → "lawardtelephone"
@@ -1225,24 +1226,22 @@ export async function GET(req: NextRequest) {
       const csaRounded =
         csaCount !== null ? Math.max(1000, Math.ceil(csaCount / 50) * 50) : null;
       const lic = inst.licenseCount ?? null;
-      // NOC360 bills ACTUAL monitored usage (rounded), not a license floor. The
-      // CSA license_count isn't a reliable contractual floor — it runs high or
-      // stale for some accounts (Premier reads 84,000 vs a 28,000 agreement;
-      // PVT's 7,450 predates its DSL churn), so flooring on it over-bills. The
-      // license is surfaced for reference (Order Form column) only. Fall back to
-      // it solely when there's no usage figure at all.
+      // The committed license is the floor: a NOC360 renewal never bills below it
+      // even when rounded usage is lower (Norvado: 20,000 committed vs ~15,550
+      // usage → bill 20,000), and bills rounded usage when usage has grown past
+      // the license. renewalCount = max(rounded usage, license).
       //
-      // EXCEPTION — NOC360_LICENSE_FLOOR: a few accounts have a real committed
-      // license that IS the floor, so their renewal must never drop below it even
-      // when rounded usage is lower (Norvado: 20,000 committed vs ~15,550 usage).
-      // Opt-in per account, because most license_counts can't be trusted (above).
-      const floorsOnLicense = NOC360_LICENSE_FLOOR.has(
-        inst.instanceName.trim().toLowerCase()
-      );
+      // Guard: a license_count can read stale-HIGH for a few accounts (Premier
+      // once showed 84k vs ~28k usage), which would over-bill if trusted as the
+      // floor. When the license towers over usage (≥ NOC360_LICENSE_REVIEW_MULTIPLE×)
+      // we still surface it but flag the row for a human check instead of silently
+      // billing it.
       const renewalCount =
-        floorsOnLicense && lic != null
-          ? Math.max(csaRounded ?? 0, lic)
+        csaRounded != null && lic != null
+          ? Math.max(csaRounded, lic)
           : csaRounded ?? lic ?? null;
+      const licenseTowersOverUsage =
+        csaRounded != null && lic != null && lic > csaRounded * NOC360_LICENSE_REVIEW_MULTIPLE;
       const noc360DealName = `${inst.instanceName} (NOC360 Renewal - ${renewalYear})`;
       const existingDeal = existingNoc360Deals.find(
         (d) => d.properties?.dealname === noc360DealName
@@ -1277,8 +1276,10 @@ export async function GET(req: NextRequest) {
         nocInstanceId: inst.instanceId ?? null,
         csaInstanceName: inst.instanceName,
         sheetNote: "NOC360 renewal",
-        needsReview: false,
-        needsReviewReason: null,
+        needsReview: licenseTowersOverUsage,
+        needsReviewReason: licenseTowersOverUsage
+          ? `License ${lic?.toLocaleString()} is ${(lic! / csaRounded!).toFixed(1)}× the rounded usage ${csaRounded?.toLocaleString()} — verify it's a real committed floor, not a stale/high reading, before billing the license.`
+          : null,
         unmatchedCsa: false,
         platform: "NOC360",
         csaLicenseCount: lic,
