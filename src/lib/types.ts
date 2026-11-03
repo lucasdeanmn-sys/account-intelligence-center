@@ -178,7 +178,7 @@ export interface RenewalEntry {
 
 // A deal "pending billing" that is NOT a renewal — surfaced so it reaches Joan
 // (billing) without going into the Adtran renewal list. Two kinds:
-//   "new-logo"  — a company's first MSI term (no prior MSI deal), in Ready for Billing.
+//   "new-logo"  — a company's first MSI term (no prior MSI deal).
 //   "extension" — an extension deal closed-won on its own (Pending/Ready for Billing),
 //                 outside the normal MSI-renewal merge.
 export interface NetNewDeal {
@@ -191,7 +191,11 @@ export interface NetNewDeal {
   termStart: string | null;
   /** One year from termStart minus a day (the billable term end), YYYY-MM-DD. */
   termEnd: string | null;
-  /** Date the deal entered its billing stage ("moved to Ready for Billing"), YYYY-MM-DD. */
+  /** The deal's current billing stage. "pending" deals can be moved to "ready". */
+  stage: "pending" | "ready";
+  /** HubSpot pipeline id — determines which Ready-for-Billing stage a move targets. */
+  pipeline: string;
+  /** Date the deal entered its CURRENT billing stage, YYYY-MM-DD. */
   movedToBilling: string | null;
   type: "new-logo" | "extension";
 }

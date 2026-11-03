@@ -1006,7 +1006,8 @@ export async function getNetNewPendingBilling(): Promise<{
     `hs_date_entered_${NETNEW_STAGE_READY}`,
     `hs_date_entered_${MSI_STAGE_READY}`,
   ];
-  const baseProps = ["dealname", "subscription_start_date", "createdate", ...BILLING_STAGE_ENTERED_PROPS];
+  const baseProps = ["dealname", "subscription_start_date", "createdate", "dealstage", "pipeline", ...BILLING_STAGE_ENTERED_PROPS];
+  const READY_STAGES = new Set([NETNEW_STAGE_READY, MSI_STAGE_READY]);
   const [accessRfb, msiRfb] = await Promise.all([
     searchDeals(
       [
@@ -1083,6 +1084,12 @@ export async function getNetNewPendingBilling(): Promise<{
       );
       if (hasPrior) continue;
       const termStart = toYmd(d.properties?.subscription_start_date);
+      const stage = READY_STAGES.has(d.properties?.dealstage) ? "ready" : "pending";
+      // Entry date of the CURRENT stage — not just "first billing date set".
+      const stageEntered = stage === "ready"
+        ? d.properties?.[`hs_date_entered_${NETNEW_STAGE_READY}`] ??
+          d.properties?.[`hs_date_entered_${MSI_STAGE_READY}`]
+        : d.properties?.[`hs_date_entered_${NETNEW_STAGE_PENDING_BILLING}`];
       newLogos.push({
         dealId: String(d.id),
         dealName: d.properties?.dealname ?? "",
@@ -1090,10 +1097,9 @@ export async function getNetNewPendingBilling(): Promise<{
         license: info.get(d.id)?.billedQty ?? null,
         termStart,
         termEnd: oneYearTermEnd(termStart),
-        movedToBilling:
-          toYmd(
-            BILLING_STAGE_ENTERED_PROPS.map((p) => d.properties?.[p]).find(Boolean)
-          ) ?? toYmd(d.properties?.createdate),
+        stage,
+        pipeline: d.properties?.pipeline ?? NETNEW_PIPELINE_ID,
+        movedToBilling: toYmd(stageEntered) ?? toYmd(d.properties?.createdate),
         type: "new-logo",
       });
     }
@@ -1113,6 +1119,7 @@ export async function getNetNewPendingBilling(): Promise<{
       "dealname",
       "subscription_start_date",
       "dealstage",
+      "pipeline",
       "createdate",
       `hs_date_entered_${EXT_STAGE_PENDING_BILLING}`,
       `hs_date_entered_${EXT_STAGE_READY}`,
@@ -1124,10 +1131,10 @@ export async function getNetNewPendingBilling(): Promise<{
   );
   const standaloneExtensions: NetNewDeal[] = extDeals.map((d: any) => {
     const termStart = toYmd(d.properties?.subscription_start_date);
-    const moved =
-      d.properties?.[`hs_date_entered_${EXT_STAGE_PENDING_BILLING}`] ??
-      d.properties?.[`hs_date_entered_${EXT_STAGE_READY}`] ??
-      d.properties?.createdate;
+    const stage = d.properties?.dealstage === EXT_STAGE_READY ? "ready" : "pending";
+    const moved = stage === "ready"
+      ? d.properties?.[`hs_date_entered_${EXT_STAGE_READY}`]
+      : d.properties?.[`hs_date_entered_${EXT_STAGE_PENDING_BILLING}`];
     return {
       dealId: String(d.id),
       dealName: d.properties?.dealname ?? "",
@@ -1135,12 +1142,34 @@ export async function getNetNewPendingBilling(): Promise<{
       license: extInfo.get(d.id)?.billedQty ?? null,
       termStart,
       termEnd: oneYearTermEnd(termStart),
-      movedToBilling: toYmd(moved),
+      stage,
+      pipeline: d.properties?.pipeline ?? MSI_EXTENSION_PIPELINE_ID,
+      movedToBilling: toYmd(moved) ?? toYmd(d.properties?.createdate),
       type: "extension" as const,
     };
   });
 
   return { newLogos, standaloneExtensions };
+}
+
+// Advance a net-new / standalone-extension deal from Pending Billing to the
+// Ready-for-Billing stage of whichever pipeline it lives in. Used by the
+// msi-tracker "Move to Ready for Billing" button.
+const READY_STAGE_BY_PIPELINE: Record<string, string> = {
+  [NETNEW_PIPELINE_ID]: NETNEW_STAGE_READY,
+  [MSI_PIPELINE_ID]: MSI_STAGE_READY,
+  [MSI_EXTENSION_PIPELINE_ID]: EXT_STAGE_READY,
+};
+export async function moveDealToReadyForBilling(
+  dealId: string,
+  pipeline: string
+): Promise<{ dealId: string; dealstage: string }> {
+  const ready = READY_STAGE_BY_PIPELINE[pipeline];
+  if (!ready) throw new Error(`No Ready-for-Billing stage known for pipeline ${pipeline}`);
+  await hs("PATCH", `/crm/v3/objects/deals/${dealId}`, {
+    properties: { dealstage: ready },
+  });
+  return { dealId, dealstage: ready };
 }
 
 export async function updateNoteBody(noteId: string, htmlBody: string) {

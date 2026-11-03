@@ -12,6 +12,8 @@ import {
   X,
   Plus,
   RefreshCw,
+  ArrowRight,
+  Clock,
 } from "lucide-react";
 import type { RenewalEntry, NetNewDeal } from "@/lib/types";
 import type { CsaInstance } from "@/lib/csa";
@@ -789,6 +791,7 @@ export default function MSITrackerPage() {
   const [emailModal, setEmailModal] = useState<{ subject: string; body: string; to: string[]; deals: RenewalEntry[] } | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
   const [netNew, setNetNew] = useState<NetNewDeal[]>([]);
+  const [movingId, setMovingId] = useState<string | null>(null);
   const [csaInstances, setCsaInstances] = useState<CsaInstance[]>([]);
   const [csaError, setCsaError] = useState<string | null>(null);
   const [csaOverrides, setCsaOverrides] = useState<Record<string, CsaOverride>>(() => {
@@ -987,14 +990,44 @@ export default function MSITrackerPage() {
     // Net-new / pending-billing is not month-scoped — fetch it alongside the
     // report (non-blocking). Catches new-logo + standalone-extension deals that
     // aren't renewals so they reach Joan without going to Adtran.
-    fetch("/api/msi-renewals/net-new")
+    refreshNetNew();
+  }
+
+  function refreshNetNew() {
+    return fetch("/api/msi-renewals/net-new")
       .then((r) => (r.ok ? r.json() : { newLogos: [], standaloneExtensions: [] }))
       .then((d) => setNetNew([...(d.newLogos ?? []), ...(d.standaloneExtensions ?? [])]))
       .catch(() => setNetNew([]));
   }
 
+  // Advance a Pending-Billing net-new/extension deal to Ready for Billing, then
+  // refresh so its badge flips and it becomes eligible for the Joan email.
+  async function moveNetNewToReady(d: NetNewDeal) {
+    setMovingId(d.dealId);
+    try {
+      const res = await fetch("/api/msi-renewals/net-new/move", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dealId: d.dealId, pipeline: d.pipeline }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      await refreshNetNew();
+    } catch (e: any) {
+      setError(e.message || "Failed to move deal to Ready for Billing");
+    } finally {
+      setMovingId(null);
+    }
+  }
+
   async function generateNetNewEmail() {
-    if (!netNew.length) return;
+    // Only deals actually in Ready for Billing go to Joan — a Pending deal
+    // (or one whose term hasn't started) isn't billable yet.
+    const ready = netNew.filter((d) => d.stage === "ready");
+    if (!ready.length) {
+      setError("No net-new deals are in Ready for Billing yet — move the billable ones first.");
+      return;
+    }
     setEmailLoading(true);
     try {
       const label = expirationDate
@@ -1005,7 +1038,7 @@ export default function MSITrackerPage() {
       const res = await fetch("/api/msi-renewals/email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ netNewDeals: netNew, monthLabel: label, platform: "NET_NEW" }),
+        body: JSON.stringify({ netNewDeals: ready, monthLabel: label, platform: "NET_NEW" }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -1386,10 +1419,28 @@ export default function MSITrackerPage() {
             </button>
           </div>
           <p className="text-xs mb-2" style={{ color: "#64748b" }}>
-            Not renewals — new logos and standalone extensions in Ready for Billing. Goes to Joan only, not the Adtran renewal list.
+            Not renewals — new logos and standalone extensions. Only deals whose term has started and are in <span style={{ color: "#94a3b8" }}>Ready for Billing</span> go on the Joan email (not the Adtran renewal list).
           </p>
           <div className="space-y-2">
-            {netNew.map((d) => (
+            {netNew.map((d) => {
+              const today = new Date().toISOString().slice(0, 10);
+              // Term-start gating: a deal isn't billable until its term begins.
+              const termStarted = !!d.termStart && d.termStart <= today;
+              const status: "ready" | "billable" | "upcoming" | "no-term" =
+                d.stage === "ready"
+                  ? "ready"
+                  : !d.termStart
+                  ? "no-term"
+                  : termStarted
+                  ? "billable"
+                  : "upcoming";
+              const badge = {
+                ready:    { bg: "#22c55e15", fg: "#22c55e", label: `Ready for Billing${d.movedToBilling ? ` · ${d.movedToBilling}` : ""}` },
+                billable: { bg: "#f9731615", fg: "#fb923c", label: "Pending Billing" },
+                upcoming: { bg: "#38bdf815", fg: "#38bdf8", label: `Upcoming · term starts ${d.termStart}` },
+                "no-term":{ bg: "#ef444415", fg: "#f87171", label: "Term not set" },
+              }[status];
+              return (
               <div key={d.dealId} className="rounded-xl border px-4 py-3 flex items-center justify-between gap-4"
                 style={{ backgroundColor: "#1a1d27", borderColor: "#252836" }}>
                 <div className="min-w-0">
@@ -1399,21 +1450,39 @@ export default function MSITrackerPage() {
                       style={{ backgroundColor: d.type === "new-logo" ? "#22c55e15" : "#6366f115", color: d.type === "new-logo" ? "#22c55e" : "#a5b4fc" }}>
                       {d.type === "new-logo" ? "New Logo" : "Extension"}
                     </span>
-                    <span className="shrink-0 text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "#f9731615", color: "#fb923c" }}>
-                      Moved to Ready for Billing{d.movedToBilling ? ` · ${d.movedToBilling}` : ""}
+                    <span className="shrink-0 text-xs px-1.5 py-0.5 rounded flex items-center gap-1" style={{ backgroundColor: badge.bg, color: badge.fg }}>
+                      {status === "upcoming" && <Clock size={10} />}
+                      {status === "no-term" && <AlertCircle size={10} />}
+                      {badge.label}
                     </span>
                   </div>
                   <p className="text-xs mt-0.5 truncate" style={{ color: "#64748b" }}>
                     {d.dealName}
-                    {d.termStart && ` · Term ${d.termStart}${d.termEnd ? `–${d.termEnd}` : ""}`}
+                    {d.termStart
+                      ? ` · Term ${d.termStart}${d.termEnd ? `–${d.termEnd}` : ""}`
+                      : " · No start date in HubSpot"}
                   </p>
                 </div>
-                <div className="text-right shrink-0">
-                  <p className="text-sm font-medium text-white">{d.license != null ? d.license.toLocaleString() : "—"}</p>
-                  <p className="text-xs" style={{ color: "#475569" }}>license</p>
+                <div className="flex items-center gap-4 shrink-0">
+                  {status === "billable" && (
+                    <button
+                      onClick={() => moveNetNewToReady(d)}
+                      disabled={movingId === d.dealId}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors disabled:opacity-50"
+                      style={{ borderColor: "#f9731640", color: "#fb923c" }}
+                    >
+                      {movingId === d.dealId ? <Loader2 size={12} className="animate-spin" /> : <ArrowRight size={12} />}
+                      Move to Ready
+                    </button>
+                  )}
+                  <div className="text-right">
+                    <p className="text-sm font-medium text-white">{d.license != null ? d.license.toLocaleString() : "—"}</p>
+                    <p className="text-xs" style={{ color: "#475569" }}>license</p>
+                  </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
