@@ -734,7 +734,7 @@ export async function GET(req: NextRequest) {
     // re-fetched every deal→companies association individually.
     const [dealCompanyMap, freshDeals] = await Promise.all([
       getDealCompanyMap(nocLookupIds),
-      getDealsByIds(filteredIds, ["service_terminated", "did_not_renew"]).catch(() => []),
+      getDealsByIds(filteredIds, ["service_terminated", "did_not_renew", "subscription_start_date", "dealstage"]).catch(() => []),
     ]);
     const [notesByDealId, allNocIds] = await Promise.all([
       getDealNotesBatch(filteredIds, dealCompanyMap),
@@ -755,13 +755,30 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Build maps from deal ID → fresh service_terminated / did_not_renew values
+    // Build maps from deal ID → fresh service_terminated / did_not_renew values.
+    // These come from batch/read (not search), so they're immune to HubSpot's
+    // search-index lag. We also capture the fresh start date + stage: right after
+    // a processing run the search index can briefly return the just-created
+    // renewal deal (start = NEXT term) as if it were the current expiring deal,
+    // which flipped "Processed" back to "Process". The fresh start date lets the
+    // processed check below recognize that case regardless of index state.
     const freshSvcTermMap = new Map<string, string>();
     const freshDnrSet = new Set<string>();
+    const freshSsdMsMap = new Map<string, number>();
+    const freshStageMap = new Map<string, string>();
     for (const d of freshDeals) {
       const val = d.properties?.service_terminated;
       if (val) freshSvcTermMap.set(String(d.id), val);
       if (d.properties?.did_not_renew === "true") freshDnrSet.add(String(d.id));
+      // batch/read returns subscription_start_date as an ISO date ("2026-12-01"),
+      // whereas search returns a ms-epoch string — normalize both to epoch ms.
+      const rawSsd = d.properties?.subscription_start_date;
+      if (rawSsd) {
+        const s = String(rawSsd);
+        const ms = /^\d+$/.test(s) ? Number(s) : Date.parse(s);
+        if (ms > 0) freshSsdMsMap.set(String(d.id), ms);
+      }
+      if (d.properties?.dealstage) freshStageMap.set(String(d.id), d.properties.dealstage);
     }
 
     // Parse M1 notes with regex (fast, no AI required)
@@ -998,9 +1015,22 @@ export async function GET(req: NextRequest) {
       // a stale termination date from a prior year's renewal (e.g. Citynet's
       // 2025-09-30) must NOT mark this cycle processed — that hid unrenewed
       // deals as done.
+      // Lag-immune backstop: if the deal the report selected as "current" is
+      // itself a billing-stage deal whose fresh start date is the NEXT term
+      // (>= renewalStartMs), the search index handed us the just-created renewal
+      // deal as the current one. That only happens once the renewal is already
+      // staged, so the cycle IS processed — don't let the stale selection flip
+      // the badge back to "Process". Uses batch/read start date + stage, which
+      // don't suffer the search-index lag that caused the mis-selection.
+      const curFreshSsdMs = freshSsdMsMap.get(String(deal.id)) ?? 0;
+      const curFreshStage = freshStageMap.get(String(deal.id)) ?? deal.properties?.dealstage ?? "";
+      const selectedDealIsRenewal =
+        curFreshSsdMs >= renewalStartMs && processedStageIds.has(curFreshStage);
+
       const processed = !cancelled && !!(
         (renewalDeal && renewalStage && processedStageIds.has(renewalStage)) ||
-        (svcTermDate && svcTermDate === expirationDate)
+        (svcTermDate && svcTermDate === expirationDate) ||
+        selectedDealIsRenewal
       );
 
       // Sheet note: M comes ONLY from the note title, N from the italic count.
