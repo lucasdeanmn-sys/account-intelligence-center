@@ -51,6 +51,30 @@ export const YEAR_ENTRY_RE =
   /(?:MSI\s+)?Year\s+(\d+)\s*[-–—−:]\s*(?:([\d,]+)(?:\s*\([^)]*\))?|\((\d[\d,]*)\))/i;
 
 /**
+ * Wrap the "MSI Year N - ..." line for the given year in <em> tags, marking it
+ * invoiced in the M1 Order Form note. Idempotent: returns the HTML unchanged if
+ * that exact year's line is already italic or isn't present. The year boundary
+ * is exact (Year 1 never matches Year 10/11/…) thanks to the trailing dash.
+ */
+export function italicizeYearInNote(html: string, year: number): string {
+  // Already italic? Require an <em>/<i> immediately wrapping "MSI Year N -".
+  const alreadyRe = new RegExp(
+    `<(?:em|i)[^>]*>\\s*MSI\\s+Year\\s+${year}\\s*[-–—]`,
+    "i"
+  );
+  if (alreadyRe.test(html)) return html;
+  // Match the bare "MSI Year N - ..." text sitting directly inside a tag
+  // (preceded by >, followed by <, no nested tags) and wrap it in <em>.
+  const re = new RegExp(
+    `(>)(\\s*MSI\\s+Year\\s+${year}\\s*[-–—][^<]*)(<)`,
+    "gi"
+  );
+  return html.replace(re, (_, open, content, close) =>
+    `${open}<em>${content.trim()}</em>${close}`
+  );
+}
+
+/**
  * Collect italic (already-invoiced) year entries: Map of year number → count.
  * Expects entity-decoded HTML (see decodeNoteEntities).
  * Unique years only — the same year italicized twice counts once.

@@ -1,31 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { updateNoteBody } from "@/lib/hubspot";
+import { italicizeYearInNote } from "@/lib/m1Note";
 import type { RenewalEntry } from "@/lib/types";
 
 export const maxDuration = 30;
-
-/**
- * Wraps the "MSI Year N - ..." line for nextMsiYear in <em> tags,
- * marking it as invoiced in the M1 Order Form note.
- */
-function italicizeNextYear(html: string, nextMsiYear: number): string {
-  // Check if already italic
-  const alreadyRe = new RegExp(
-    `<(?:em|i)[^>]*>[^<]*MSI[^<]*Year[^<]*${nextMsiYear}`,
-    "i"
-  );
-  if (alreadyRe.test(html)) return html;
-
-  // Match text content "MSI Year N - ..." sitting directly inside a tag
-  // (i.e. preceded by > and followed by <, with no nested tags)
-  const re = new RegExp(
-    `(>)(\\s*MSI\\s+Year\\s+${nextMsiYear}\\s*[-–—][^<]*)(<)`,
-    "gi"
-  );
-  return html.replace(re, (_, open, content, close) =>
-    `${open}<em>${content.trim()}</em>${close}`
-  );
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -46,7 +24,7 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      const updatedHtml = italicizeNextYear(deal.m1NoteHtml, deal.nextMsiYear);
+      const updatedHtml = italicizeYearInNote(deal.m1NoteHtml, deal.nextMsiYear);
 
       if (updatedHtml === deal.m1NoteHtml) {
         results.push({ company: deal.company, status: "skipped", reason: "already italic" });

@@ -1005,10 +1005,14 @@ export default function MSITrackerPage() {
   async function moveNetNewToReady(d: NetNewDeal) {
     setMovingId(d.dealId);
     try {
+      // A new logo's first term is Year 1; parse from the deal name in case a
+      // label ever differs, so the right year gets italicized on the M1 note.
+      const yearMatch = d.dealName.match(/Year\s*[-–—]?\s*(\d+)/i);
+      const year = yearMatch ? parseInt(yearMatch[1], 10) : 1;
       const res = await fetch("/api/msi-renewals/net-new/move", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dealId: d.dealId, pipeline: d.pipeline }),
+        body: JSON.stringify({ dealId: d.dealId, pipeline: d.pipeline, year }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -1419,19 +1423,25 @@ export default function MSITrackerPage() {
             </button>
           </div>
           <p className="text-xs mb-2" style={{ color: "#64748b" }}>
-            Not renewals — new logos and standalone extensions. Only deals whose term has started and are in <span style={{ color: "#94a3b8" }}>Ready for Billing</span> go on the Joan email (not the Adtran renewal list).
+            Not renewals — new logos and standalone extensions. Deals whose term starts by next month can be moved to <span style={{ color: "#94a3b8" }}>Ready for Billing</span> (which also italicizes their year on the M1 note); only Ready-for-Billing deals go on the Joan email (not the Adtran renewal list).
           </p>
           <div className="space-y-2">
             {netNew.map((d) => {
-              const today = new Date().toISOString().slice(0, 10);
-              // Term-start gating: a deal isn't billable until its term begins.
-              const termStarted = !!d.termStart && d.termStart <= today;
+              // Billing window: a deal is actionable once its term starts by the
+              // END of NEXT month. In November that covers every 12/xx start (the
+              // current MSI cycle bills a month ahead) plus anything already
+              // started; Jan+ starts stay "Upcoming".
+              const nowD = new Date();
+              const billableThrough = new Date(
+                Date.UTC(nowD.getUTCFullYear(), nowD.getUTCMonth() + 2, 0)
+              ).toISOString().slice(0, 10);
+              const inWindow = !!d.termStart && d.termStart <= billableThrough;
               const status: "ready" | "billable" | "upcoming" | "no-term" =
                 d.stage === "ready"
                   ? "ready"
                   : !d.termStart
                   ? "no-term"
-                  : termStarted
+                  : inWindow
                   ? "billable"
                   : "upcoming";
               const badge = {
