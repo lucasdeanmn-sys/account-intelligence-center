@@ -735,8 +735,19 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
     byName.set(key, existing);
   }
 
-  // Active extension deals and their parsed extension names
-  const active: { dealId: string; extName: string }[] = [];
+  // Parse each candidate extension deal into company keys + a cleaned base name.
+  // We collapse below so a renewal isn't labeled with extensions from past terms:
+  //   • a one-time proration ("… Prorated …") is never an ongoing extension — it
+  //     catches a mid-term start up to the first renewal, so drop it whenever the
+  //     company has a real (non-proration) extension of the same base.
+  //   • year-versioned extensions ("POM Year 1", "POM Year 2") keep only the
+  //     latest year; a prior year's deal is last term, not this renewal.
+  // Without this, Jo-Carroll's 2025 "Prorated - POM" and "POM Year 1" deals both
+  // stamped onto its 2026 renewal line. The stored label is the base name ("POM"),
+  // matching how a POM line item on the renewal deal renders, so the Adtran email
+  // reads the same whether POM lives as a line item or its own deal.
+  type ExtEntry = { dealId: string; keys: string[]; base: string; year: number; prorated: boolean };
+  const entries: ExtEntry[] = [];
 
   for (const deal of deals) {
     if (deal.properties?.service_terminated) continue;
@@ -752,11 +763,42 @@ export async function getActiveExtensionCompanies(): Promise<ExtensionIndex> {
     if (/\bYear\s+\d+\b/i.test(name) && !/extension/i.test(name) && !inExtPipe) continue;
     const raw     = name.slice(0, idx).trim();
     const extName = extractExtensionName(name);
-    // Store under exact lowercase key AND normalised key
-    addToName(raw.toLowerCase(), extName);
+    const yearMatch = extName.match(/\bYear\s+(\d+)\b/i);
+    const year = yearMatch ? Number(yearMatch[1]) : 0;
+    // Base name: strip the "Year N" and any "Prorated" so variants of the same
+    // extension group together and the label is clean (e.g. "POM").
+    const base = extName
+      .replace(/\bYear\s+\d+\b/i, "")
+      .replace(/\bprorated\b/i, "")
+      .replace(/[-–—]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || extName.trim();
+    const prorated = /\bprorat/i.test(name) || /\bprorat/i.test(extName);
+    const keys = [raw.toLowerCase()];
     const normKey = normExtCo(raw);
-    if (normKey !== raw.toLowerCase()) addToName(normKey, extName);
-    active.push({ dealId: deal.id, extName });
+    if (normKey !== raw.toLowerCase()) keys.push(normKey);
+    entries.push({ dealId: deal.id, keys, base, year, prorated });
+  }
+
+  // Collapse per (company, base): drop prorations when a real extension exists,
+  // then keep only the highest-year entries.
+  const groups = new Map<string, ExtEntry[]>();
+  for (const e of entries) {
+    const gk = `${e.keys[0]}||${e.base.toLowerCase()}`;
+    const g = groups.get(gk);
+    if (g) g.push(e);
+    else groups.set(gk, [e]);
+  }
+  // Active extension deals and their parsed extension names (post-collapse)
+  const active: { dealId: string; extName: string }[] = [];
+  for (const group of Array.from(groups.values())) {
+    const nonProrated = group.filter((e) => !e.prorated);
+    const pool = nonProrated.length ? nonProrated : group;
+    const maxYear = Math.max(...pool.map((e) => e.year));
+    for (const e of pool.filter((e) => e.year === maxYear)) {
+      for (const key of e.keys) addToName(key, e.base);
+      active.push({ dealId: e.dealId, extName: e.base });
+    }
   }
 
   // Defer the noc_instance_id lookups for extension deals.
@@ -1185,6 +1227,36 @@ export async function updateLineItem(lineItemId: string, quantity: number) {
   });
 }
 
+// Update an MSI base line item's quantity AND re-tier it when the renewal count
+// crosses into a different band. Processing a renewal deal that already had line
+// items used to only bump the quantity (updateLineItem), so a tier jump — e.g.
+// Clay County 1,200 → 7,200 — kept the old 1k-2.5k catalog price ($3.12) on
+// 7,200 units. We only re-tier when the line's CURRENT product is one of the
+// standard MSI catalog tiers and the band actually changes; a negotiated/custom
+// product (not in the tier table) keeps its price and only gets the new quantity.
+// MSI base lines only — NOC360 (contracted pricing) and extensions are handled
+// by their own paths.
+export async function updatePrimaryMsiLineItem(
+  lineItem: any,
+  renewalCount: number
+): Promise<void> {
+  const curProductId: string | null = lineItem?.properties?.hs_product_id ?? null;
+  const onStandardTier = MSI_PRODUCT_TIERS.some((t) => t.id === curProductId);
+  const tier = msiTierForCount(renewalCount);
+  if (onStandardTier && tier && curProductId !== tier.id) {
+    await hs("PATCH", `/crm/v3/objects/line_items/${lineItem.id}`, {
+      properties: {
+        quantity: String(renewalCount),
+        hs_product_id: tier.id,
+        name: tier.name,
+        price: String(tier.price),
+      },
+    });
+    return;
+  }
+  await updateLineItem(lineItem.id, renewalCount);
+}
+
 export async function updateDealProperties(dealId: string, properties: Record<string, string>) {
   try {
     return await hs("PATCH", `/crm/v3/objects/deals/${dealId}`, { properties });
@@ -1492,16 +1564,16 @@ export async function createLineItem(
 
 // Maps renewal circuit count to the correct MSI product catalog ID + standardized name.
 // Tiers match the HubSpot product library naming convention: MSI (xk-yk).
-const MSI_PRODUCT_TIERS: { max: number; id: string; name: string }[] = [
-  { max: 2_500,     id: "1618654015", name: "MSI (1k-2.5k)"    },
-  { max: 5_000,     id: "1618656776", name: "MSI (2.5k-5k)"    },
-  { max: 10_000,    id: "1618656777", name: "MSI (5k-10k)"     },
-  { max: 50_000,    id: "1618654016", name: "MSI (10k-50k)"    },
-  { max: 100_000,   id: "2086570789", name: "MSI (50k-100k)"   },
-  { max: 500_000,   id: "2086400308", name: "MSI (100k-500k)"  },
-  { max: 800_000,   id: "2086400312", name: "MSI (500k-800k)"  },
-  { max: 2_000_000, id: "2086570803", name: "MSI (800k-2M)"    },
-  { max: 4_000_000, id: "2086400317", name: "MSI (2M-4M)"      },
+const MSI_PRODUCT_TIERS: { max: number; id: string; name: string; price: number }[] = [
+  { max: 2_500,     id: "1618654015", name: "MSI (1k-2.5k)",   price: 3.12 },
+  { max: 5_000,     id: "1618656776", name: "MSI (2.5k-5k)",   price: 1.87 },
+  { max: 10_000,    id: "1618656777", name: "MSI (5k-10k)",    price: 1.62 },
+  { max: 50_000,    id: "1618654016", name: "MSI (10k-50k)",   price: 1.37 },
+  { max: 100_000,   id: "2086570789", name: "MSI (50k-100k)",  price: 1.09 },
+  { max: 500_000,   id: "2086400308", name: "MSI (100k-500k)", price: 0.94 },
+  { max: 800_000,   id: "2086400312", name: "MSI (500k-800k)", price: 0.87 },
+  { max: 2_000_000, id: "2086570803", name: "MSI (800k-2M)",   price: 0.81 },
+  { max: 4_000_000, id: "2086400317", name: "MSI (2M-4M)",     price: 0.72 },
 ];
 
 // A count sitting exactly on a tier boundary (2,500 / 5,000 / 10,000 / …)

@@ -3,6 +3,7 @@ import {
   createMsiRenewalDeal,
   getDealLineItems,
   updateLineItem,
+  updatePrimaryMsiLineItem,
   updateDealProperties,
   cloneLineItemsToDeal,
   getExtensionDealsForCompany,
@@ -203,8 +204,15 @@ export async function POST(req: NextRequest) {
     let hadLineItems = existingLineItems.length > 0;
 
     if (existingLineItems.length > 0) {
-      // Renewal deal already has line items — just update the primary quantity
-      await updateLineItem(existingLineItems[0].id, renewalCount);
+      // Renewal deal already has line items — update the primary quantity.
+      // For MSI, also re-tier the primary line's product/band so a count that
+      // jumped a tier (e.g. Clay County 1,200 → 7,200) isn't billed at the old
+      // band's catalog price. NOC360 keeps its contracted price, quantity only.
+      if (isNoc360) {
+        await updateLineItem(existingLineItems[0].id, renewalCount);
+      } else {
+        await updatePrimaryMsiLineItem(existingLineItems[0], renewalCount);
+      }
     } else if (isNoc360) {
       // NOC360: no current deal to clone from — create the tier-matched
       // catalog product line item (monthly per-sub pricing, same modeling as

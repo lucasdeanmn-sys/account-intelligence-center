@@ -96,7 +96,7 @@ export async function POST(req: NextRequest) {
       // different quantity than the MSI count (POM on fiber circuits), so its
       // line shows the POM quantity — e.g. "(Auto-renewal, 22,300 POM)".
       const nuveraException = /\bnuvera\b/i.test(d.company);
-      const extLabels =
+      const extLabelsRaw =
         info?.extensions && info.extensions.length > 0
           ? info.extensions.map((e) =>
               nuveraException && e.qty != null
@@ -104,6 +104,8 @@ export async function POST(req: NextRequest) {
                 : e.name
             )
           : d.extensionNames ?? [];
+      // Fiberlytix is handled separately by Ryan — never on the Adtran MSI list.
+      const extLabels = extLabelsRaw.filter((l) => !/fiberlytix/i.test(l));
       // Combine note + extension labels into a single parenthetical so the line
       // stays on one row — Gmail strips leading-space indentation when converting
       // plain text to HTML, making separate sub-bullet lines merge into the main.
